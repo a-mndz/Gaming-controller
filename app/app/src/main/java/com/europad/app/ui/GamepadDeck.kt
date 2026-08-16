@@ -29,6 +29,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.europad.app.input.ButtonLo
@@ -81,6 +83,7 @@ private fun HoldButton(label: String, bit: Int, deck: DeckEngine, w: Int = 76, h
             .size(w.dp, h.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(Color(0xFF2A2A4E))
+            .semantics { contentDescription = "pad:$label" }
             .pointerInput(bit) {
                 detectTapGestures(
                     onPress = {
@@ -124,6 +127,7 @@ private fun RoundHold(item: Pair<String, Int>, deck: DeckEngine) {
             .size(58.dp)
             .clip(CircleShape)
             .background(Color(0xFF3A3A6E))
+            .semantics { contentDescription = "pad:${item.first}" }
             .pointerInput(item.second) {
                 detectTapGestures(
                     onPress = {
@@ -154,6 +158,7 @@ private fun DPad(deck: DeckEngine) {
             .size(size.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(Color(0xFF20203A))
+            .semantics { contentDescription = "pad:DPAD" }
             .pointerInput(Unit) {
                 detectTapGestures(
                     onPress = { off ->
@@ -185,6 +190,7 @@ private fun Stick(name: String, deck: DeckEngine) {
             .size(120.dp)
             .clip(CircleShape)
             .background(Color(0xFF26264A))
+            .semantics { contentDescription = "pad:STICK_$name" }
             .pointerInput(isLeft) {
                 val cx = size.width / 2f; val cy = size.height / 2f
                 val radius = size.width / 2f

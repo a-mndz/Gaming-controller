@@ -6,7 +6,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import kotlin.system.measureTimeMillis
 
 class DeckEngine(
     private val transport: UdpTransport,
@@ -26,18 +25,15 @@ class DeckEngine(
         val periodMs = 1000L / rateHz
         senderJob = scope.launch(Dispatchers.IO) {
             val frame = InputFrame()
-            val buf = ByteArray(30)
             while (true) {
                 val tsMs = System.nanoTime() / 1_000_000L and 0xFFFFFFFFL
                 val bytes: ByteArray
                 synchronized(snapshotLock) {
                     frame.copyFrom(latest)
                     val (b, seq) = FrameEncoder.encodeSnapshot(frame, tsMs)
-                    b.copyInto(buf)
                     lastSeqSent = seq
-                    bytes = buf.copyOf()
+                    bytes = b
                 }
-                transport.drainIncoming()
                 transport.sendSnapshot(bytes)
                 Thread.sleep(periodMs)
             }

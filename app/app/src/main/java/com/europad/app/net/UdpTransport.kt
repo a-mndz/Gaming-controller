@@ -82,22 +82,6 @@ class UdpTransport {
         return -1
     }
 
-    fun drainIncoming() {
-        val sock = socket ?: return
-        val savedTimeout = sock.soTimeout
-        try {
-            sock.soTimeout = 1
-            while (true) {
-                val buf = ByteArray(64)
-                val pkt = DatagramPacket(buf, buf.size)
-                sock.receive(pkt)
-            }
-        } catch (_: Exception) {
-        } finally {
-            try { sock.soTimeout = savedTimeout } catch (_: Exception) { }
-        }
-    }
-
     fun close() {
         try { socket?.close() } catch (_: Exception) { }
         socket = null

@@ -4,7 +4,44 @@
 
 ---
 
-## 2026-08-17 (LATEST) — Audit round 6 (rating-based, phase-consistency sweep)
+## 2026-08-17 (LATEST) — PHASE 1 COMPLETE on real hardware
+
+- **All 5 PRD §4 Phase-1 acceptance criteria PASS on-device** (OPPO CPH1911, Android 11, Wi-Fi 5 GHz → 192.168.1.6; PC server at 192.168.1.2, UDP 47910):
+  1. Virtual Xbox 360 pad visible via `XInputGetState` ✓
+  2. Phone discovers server via NSD (`_europad._udp`), no manual IP ✓
+  3. Every Gamepad input verified on the virtual pad: A/B/X/Y/LB/RB/START/BACK/D-pad (all 4 dirs)/both sticks ✓
+  4. Kill Wi-Fi → failsafe neutralizes inputs (server 300 ms timer; full transport-propagation loop measured < 850 ms) ✓
+  5. HUD: RTT + transport + slot (P1) ✓
+- **Dev phone facts:** serial CUONZPQORO8HWW5P, OPPO CPH1911, Android 11, screen 2340×1080 @ 408dpi. USB debugging authorized. `svc power stayon usb` set (keeps screen on while plugged in).
+- **Hard-won debugging knowledge (do not re-learn):**
+  - `adb input swipe x y x y <ms>` is the reliable hold/press primitive; parallel `input` calls share one touch pointer — true multi-touch cannot be composed from CLI.
+  - The sender coroutine must NOT call `receive`/`drainIncoming` on the shared socket: it stole ping echoes and caused spurious failsafes. Sender = send-only; RTT loop is the sole reader (1 Hz ping). If pinging every frame is needed later, add a dedicated receiver coroutine.
+  - Compose controls expose `contentDescription = "pad:*"` — use `uiautomator dump` to read exact bounds instead of guessing coordinates. Bounds from the dump are correct; a tap that reads 0x0000 almost always means the phone wasn't on the expected screen/connection (check the app state first, not the coords).
+  - `XInputGetState` sampling must happen MID-gesture (hold/drag in flight); buttons/axes are zeroed on release, and `adb`-spawned gestures take ~300–500 ms to land.
+  - Phone foreground can land on Developer Options after USB-auth flows — always check `uiautomator dump` package name (`com.europad.app`) before blaming the app.
+- **Known gaps deferred to Phase 2 polish:** trigger LT/RT sliders, auto-reconnect after link loss, MulticastLock for flaky OEM NSD, saved-host persistence, DSCP EF, HUD median-5/loss %.
+- **Run commands:** server `dotnet server\EuroPad.Server\bin\Release\net8.0\EuroPadServer.dll`; app `adb install -r app\app\build\outputs\apk\debug\app-debug.apk` (build script: `%TEMP%\kilo\europad\build-app.ps1`); acceptance test scripts live in the same temp dir (`probe.ps1` = server self-test via synthetic UDP client).
+- **Next:** Phase 2 — T2.1 profile system → T2.2 KeyboardEmulator (already written + unit-tested) → T2.3 truck deck → T2.4 USB transport → T2.5/T2.6 gyro → T2.7 ETS2 e2e → T2.8 Doze exemption → T2.9 haptics.
+
+---
+
+## 2026-08-17 — Build session: Phase 0 done, Phase 1 server done, Android client built
+
+- **Phase 0 COMPLETE.** Toolchain: .NET SDK 8.0.424 (winget), ViGEmBus 1.22.0 (winget, service Running → virtual pads work), Temurin JDK 17 (portable zip), Gradle 8.7 (portable zip), Android SDK (cmdline-tools → platform-tools + platform-34 + build-tools 34.0.0). System `java.exe` is v25 — too new for Gradle 8.x, always set JAVA_HOME to Temurin 17.
+- **Toolchain paths (outside repo, needed to rebuild):**
+  - `JAVA_HOME = C:\Users\amand\AppData\Local\JDK\jdk-17.0.20+8`
+  - `ANDROID_HOME = C:\Users\amand\AppData\Local\Android\Sdk` (also in `app\local.properties`)
+  - Gradle: `C:\Users\amand\AppData\Local\Gradle\gradle-8.7\bin\gradle.bat`
+  - Build helper scripts + probe scripts in `C:\Users\amand\AppData\Local\Temp\kilo\europad\` (temp — may be wiped; `build-app.ps1`, `probe.ps1` are the key ones)
+- **Server (T0.2–T0.4, T1.1–T1.3, T1.5 server-side, mDNS) — complete & live-verified:** 30-byte codec, HELLO/ACK/REJECT, 4-slot SlotManager, ViGEm X360, SendInput keyboard (full x64 INPUT union — 40 bytes!), 300 ms failsafe + 2 s slot-release, seq dedupe, ping echo, PIN retry-lock, rumble relay, profile hot-reload, mDNS announce (`_europad._udp` via Makaretu.Dns.Multicast 0.27.0, wire-verified). 30/30 unit tests, 11/11 live probe, keyboard probe PASS (HORN bit → H key down/up).
+- **Android (T1.1 Kotlin mirror, T1.4, T1.5, T1.6, T1.7 partial, T1.8) — APK builds via CLI, on-device pass still pending:** mirrored codec, UdpTransport, DeckEngine 120 Hz sender, Gamepad deck (drag sticks L/R, d-pad zones, A/B/X/Y/LB/RB/START/BACK hold-press), NSD discovery + manual IP + connect flow, RTT HUD. No phone connected yet — first on-device run is the next step.
+- **Git:** repo initialized, root commit `2b7feda` (42 files, master branch). RULES §4 conventions in use.
+- **API gotcha (do not re-learn):** Nefarius.ViGEm.Client 1.21.256 has NO `Xbox360Report` struct — use `IXbox360Controller.SetButtonsFull(ushort xusbMask)` / `SetAxisValue(Xbox360Axis, short)` / `SetSliderValue(Xbox360Slider, byte)` + `AutoSubmitReport = false` + `SubmitReport()`. XUSB bit mask: DpadUp=0x0001 … Guide=0x0400, A=0x1000, B=0x2000, X=0x4000, Y=0x8000. `SendInput` requires the full `INPUT` union (mouse+key+hardware members) → 40 bytes on x64 or every call fails silently.
+- **Next session, in order:** (1) install APK on the phone (`adb install app\app\build\outputs\apk\debug\app-debug.apk` — USB debugging must be enabled on the phone), (2) run T1.9 Phase-1 checklist end-to-end over Wi-Fi, (3) finish T1.4/T1.5 polish (MulticastLock, saved hosts, DSCP), HUD polish (median-5, loss %), trigger controls in Gamepad deck, then Phase 2.
+
+---
+
+## 2026-08-17 — Audit round 6 (rating-based, phase-consistency sweep)
 
 - 5 defects found and fixed (2 medium, 3 low): Quick-start QR claim in README conflicted with QR's Phase-3 ship date (README now offers manual IP as first-class, QR labeled Phase 3); ARCHITECTURE §7.6 implied the tray displays QR from day one, but the tray app is Phase 4 (T4.6) — now sequenced: console output for QR in P3, tray surface in P4 (synced into TASKS T3.6); BIBLE §7 transport table lumped manual IP + QR into one "fallback" phrase — split and aligned with ARCHITECTURE §7 (manual IP = first-class, QR = P3); BIBLE §8 success-metric row only said "racing/gyro decks" for 240 Hz — added aim/flight per D-007; RULES §9 precedence had DECISIONS sitting below PRD/ARCHITECTURE/RULES while DECISIONS.md's own header says a dated entry overrides stale text — explicit exception clause added so the two rules don't fight.
 - Updated rating: **9.7/10 composite** (steady). Audit is at convergence — each round now yields only phase-sequencing and wording residues. Docs re-frozen; next work = TASKS T0.1.
