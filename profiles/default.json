@@ -1,0 +1,28 @@
+{
+  "name": "default",
+  "game": "Generic",
+  "keys": {
+    "IND_L": "[",
+    "IND_R": "]",
+    "HAZARD": "F",
+    "HORN": "H",
+    "AIR_HORN": "N",
+    "HANDBRAKE": "Space",
+    "LIGHTS": "L",
+    "BEAM": "K",
+    "WARNING": "O",
+    "WIPERS": "P",
+    "EXH_BRAKE": "B",
+    "DIFF_LOCK": "V",
+    "AXLE_RAISE": "U",
+    "ENGINE": "E",
+    "GEAR_UP": "Shift",
+    "GEAR_DN": "Ctrl"
+  },
+  "axisMap": {
+    "steer": "LX",
+    "throttle": "RT",
+    "brake": "LT"
+  },
+  "steerRange": 270
+}
