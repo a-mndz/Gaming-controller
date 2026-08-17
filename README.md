@@ -49,7 +49,6 @@ USB mode (Phase 2): enable USB tethering on the phone, pick the USB transport in
 
 - Server: `dotnet build server/EuroPad.Server.sln -c Release`, tests: `dotnet test server/EuroPad.Server.sln` (30 xUnit tests, all green)
 - Phone: `gradlew assembleDebug` in `app/` (or Android Studio)
-- Verified on: OPPO CPH1911 (Android 11) ↔ Windows 10/11 over Wi-Fi
 
 ## License
 
