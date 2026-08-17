@@ -10,14 +10,12 @@ server-build/
 TestResults/
 *.nupkg
 
-# Android / Gradle
+# Android / Gradle build outputs
 .gradle/
 app/build/
 app/app/build/
 build/
 local.properties
-*.apk
-*.aab
 captures/
 .externalNativeBuild/
 .cxx/
@@ -42,6 +40,7 @@ Desktop.ini
 .kilo/
 .gemini/
 .tempmediaStorage/
+docs/superpowers/
 
 # Working-state docs
 TASKS.md
@@ -49,6 +48,9 @@ TODO.md
 MEMORY.md
 DECISIONS.md
 RULES.md
+CONTINUE.md
+DESIGN.md
+PRODUCT.md
 
 # EuroPad runtime logs
 *.log
