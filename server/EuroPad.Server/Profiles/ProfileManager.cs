@@ -32,6 +32,7 @@ public sealed class ProfileManager
     {
         _dir = dir;
         Directory.CreateDirectory(dir);
+        CopySamples();
         LoadAll();
         if (_byName.Count == 0) LoadBuiltInDefault();
 
@@ -52,6 +53,36 @@ public sealed class ProfileManager
     }
 
     public void SetActive(string name) { lock (_gate) if (_byName.ContainsKey(name)) _activeName = name; }
+
+    public IReadOnlyCollection<string> Names
+    {
+        get { lock (_gate) return _byName.Keys.ToArray(); }
+    }
+
+    private static readonly string[] SampleResourceNames =
+    {
+        "EuroPad.Server.Profiles.Samples.ets2.json",
+        "EuroPad.Server.Profiles.Samples.ats.json",
+    };
+
+    private void CopySamples()
+    {
+        try
+        {
+            var asm = typeof(ProfileManager).Assembly;
+            foreach (var res in SampleResourceNames)
+            {
+                using var stream = asm.GetManifestResourceStream(res);
+                if (stream is null) continue;
+                var name = res[(res.LastIndexOf('.', res.LastIndexOf('.') - 1))..].TrimStart('.');
+                var dest = Path.Combine(_dir, name);
+                if (File.Exists(dest)) continue;
+                using var outStream = File.Create(dest);
+                stream.CopyTo(outStream);
+            }
+        }
+        catch { }
+    }
 
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 

@@ -1,9 +1,12 @@
 # .NET
 bin/
 obj/
+publish/
 *.user
 *.suo
 .vs/
+TestResults/
+*.nupkg
 
 # Android / Gradle
 .gradle/
@@ -15,6 +18,8 @@ local.properties
 captures/
 .externalNativeBuild/
 .cxx/
+release/
+.kotlin/
 
 # Kotlin
 *.class
@@ -23,10 +28,24 @@ captures/
 .idea/
 *.iml
 .vscode/
+*.DotSettings.user
 
 # OS
 Thumbs.db
 Desktop.ini
+.DS_Store
+
+# Agent tool state
+.kilocode/
+.opencode/
+.kilo/
+
+# Working-state docs (local-only; design docs stay tracked)
+TASKS.md
+TODO.md
+MEMORY.md
+DECISIONS.md
+RULES.md
 
 # EuroPad runtime
 *.log
