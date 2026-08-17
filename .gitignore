@@ -1,7 +1,9 @@
-# .NET
+# .NET build artifacts
 bin/
 obj/
 publish/
+server-bin/
+server-build/
 *.user
 *.suo
 .vs/
@@ -11,6 +13,7 @@ TestResults/
 # Android / Gradle
 .gradle/
 app/build/
+app/app/build/
 build/
 local.properties
 *.apk
@@ -21,33 +24,33 @@ captures/
 release/
 .kotlin/
 
-# Kotlin
+# Kotlin / Java
 *.class
 
-# IDE
+# IDE & OS
 .idea/
 *.iml
 .vscode/
 *.DotSettings.user
-
-# OS
 Thumbs.db
 Desktop.ini
 .DS_Store
 
-# Agent tool state
+# Agent & tool states
 .kilocode/
 .opencode/
 .kilo/
+.gemini/
+.tempmediaStorage/
 
-# Working-state docs (local-only; design docs stay tracked)
+# Working-state docs
 TASKS.md
 TODO.md
 MEMORY.md
 DECISIONS.md
 RULES.md
 
-# EuroPad runtime
+# EuroPad runtime logs
 *.log
 logs/
 profiles/local-*.json

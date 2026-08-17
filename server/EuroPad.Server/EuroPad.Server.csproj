@@ -11,8 +11,15 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- The repo's profiles/ dir is the single source of truth; they ship embedded and are
+         copied to %APPDATA%\EuroPad\profiles on first run (never overwriting user edits). -->
+    <EmbeddedResource Include="..\..\profiles\*.json" LogicalName="EuroPad.Server.Profiles.Samples.%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Makaretu.Dns.Multicast" Version="0.27.0" />
     <PackageReference Include="Nefarius.ViGEm.Client" Version="1.21.256" />
+    <PackageReference Include="QRCoder" Version="1.6.0" />
   </ItemGroup>
 
 </Project>

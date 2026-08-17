@@ -21,6 +21,7 @@ public sealed class SlotState : IAsyncDisposable
 
     public void ReleaseRumbleQueue() => RumbleOutbox = new();
     public Queue<(byte Large, byte Small)> RumbleOutbox { get; private set; } = new();
+    public long LastRumbleEnqueueTicks;
 
     public ValueTask DisposeAsync()
     {
@@ -82,11 +83,15 @@ public sealed class SlotManager
     {
         lock (s)
         {
+            s.LastRumbleEnqueueTicks = Environment.TickCount64;
+            if (_traceEnqueue) Console.WriteLine($"RUMBLE-ENQ slot={s.Slot} large={large} small={small}");
             var q = s.RumbleOutbox;
             q.Enqueue((large, small));
             while (q.Count > 8) q.Dequeue();
         }
     }
+
+    private static readonly bool _traceEnqueue = Environment.GetEnvironmentVariable("EUROPAD_RUMBLE_TRACE") == "1";
 
     public bool TryTakeRumble(SlotState s, out byte large, out byte small)
     {

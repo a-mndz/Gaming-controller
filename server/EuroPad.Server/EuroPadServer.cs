@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using EuroPad.Server.Emulation;
 using EuroPad.Server.Net;
@@ -23,6 +24,8 @@ public sealed class EuroPadServer : IAsyncDisposable
     private bool _pinEnabled;
     private int _pin;
 
+    private readonly bool _rumbleTrace = Environment.GetEnvironmentVariable("EUROPAD_RUMBLE_TRACE") == "1";
+
     public int? Pin { get; set; }
 
     public static string ProfilesDir() =>
@@ -31,11 +34,13 @@ public sealed class EuroPadServer : IAsyncDisposable
     public async Task<int> RunAsync(string[] args)
     {
         int port = Proto.DefaultPort;
+        string? profileArg = null;
         for (int i = 0; i < args.Length - 1; i++)
+        {
             if (args[i] == "--port" && int.TryParse(args[i + 1], out var p)) port = p;
-        for (int i = 0; i < args.Length - 1; i++)
-            if (args[i] == "--pin" && int.TryParse(args[i + 1], out var pin) && pin is >= 0 and <= 9999)
-                Pin = pin;
+            if (args[i] == "--pin" && int.TryParse(args[i + 1], out var pin) && pin is >= 0 and <= 9999) Pin = pin;
+            if (args[i] == "--profile") profileArg = args[i + 1];
+        }
 
         _pinEnabled = Pin.HasValue && Pin.Value != 0;
         _pin = Pin ?? 0;
@@ -53,10 +58,15 @@ public sealed class EuroPadServer : IAsyncDisposable
 
         _slots = new SlotManager(_vigem);
         _profiles = new ProfileManager(ProfilesDir());
+        if (profileArg is not null && !_profiles.SetActive(profileArg))
+            Console.Error.WriteLine($"Unknown profile '{profileArg}' — staying on '{_profiles.ActiveName}'.");
 
         Console.WriteLine($"EuroPadServer — XInput slots 0-3 (P1-P4), UDP port {port}");
         Console.WriteLine($"Profiles: {ProfilesDir()}");
+        Console.WriteLine($"Profile: {_profiles.ActiveName} (available: {string.Join(", ", _profiles.Names)}) — edit the JSON, it hot-reloads");
+        PrintReachableAddresses(port);
         if (_pinEnabled) Console.WriteLine($"PIN gate enabled ({_pin:D4})");
+        PrintPairingQr(port);
 
         try
         {
@@ -92,6 +102,71 @@ public sealed class EuroPadServer : IAsyncDisposable
         _listeners.Add(any);
     }
 
+    /// <summary>
+    /// The listener is bound to 0.0.0.0 so USB tethering (D-012) needs no extra socket — but the
+    /// tether subnet address is not discoverable via mDNS, so print every address the phone could use.
+    /// </summary>
+    private static void PrintReachableAddresses(int port)
+    {
+        foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+        {
+            if (nic.OperationalStatus != OperationalStatus.Up) continue;
+            if (nic.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+            foreach (var ua in nic.GetIPProperties().UnicastAddresses)
+            {
+                if (ua.Address.AddressFamily != AddressFamily.InterNetwork) continue;
+                var ip = ua.Address.ToString();
+                var hint = ip.StartsWith("192.168.42.", StringComparison.Ordinal) ? "  <- USB tether" : "";
+                Console.WriteLine($"  {ip}:{port}  ({nic.Name}){hint}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Pairing QR (T3.6): encodes the LAN address + port (and PIN when the gate is on). The phone
+    /// scans it to auto-fill the connect fields on first pairing. QR generation is best-effort —
+    /// a missing encoder must never keep the listener from starting.
+    /// </summary>
+    private void PrintPairingQr(int port)
+    {
+        try
+        {
+            // Prefer a real LAN adapter: skip virtual ones (VMware/Hyper-V/VPN) whose subnets
+            // a phone can never reach, then prefer 192.168.x over link-local.
+            string? ip = null;
+            foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (nic.OperationalStatus != OperationalStatus.Up || nic.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+                var name = nic.Description ?? "";
+                if (name.Contains("VMware", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("Virtual", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("Hyper-V", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("VPN", StringComparison.OrdinalIgnoreCase)) continue;
+                foreach (var ua in nic.GetIPProperties().UnicastAddresses)
+                {
+                    if (ua.Address.AddressFamily != AddressFamily.InterNetwork) continue;
+                    var a = ua.Address.ToString();
+                    if (a.StartsWith("192.168.42.", StringComparison.Ordinal)) continue; // tether subnet — no mDNS/QR story yet
+                    if (a.StartsWith("169.254.", StringComparison.Ordinal) && ip is null) continue; // link-local, last resort
+                    ip = a;
+                    if (a.StartsWith("192.168.", StringComparison.Ordinal)) break;
+                }
+                if (ip is not null && ip.StartsWith("192.168.", StringComparison.Ordinal)) break;
+            }
+            if (ip is null) return;
+
+            var payload = PairingQr.PayloadFor(ip, port, _pinEnabled ? _pin : null);
+            var qrData = new QRCoder.QRCodeGenerator().CreateQrCode(payload, QRCoder.QRCodeGenerator.ECCLevel.M);
+            Console.WriteLine("Pairing QR (scan from the phone, or enter manually):");
+            Console.WriteLine(PairingQr.RenderAscii(qrData));
+            Console.WriteLine($"  payload: {payload}");
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($"pairing QR unavailable: {e.Message}");
+        }
+    }
+
     private async Task ListenLoopAsync(UdpClient client, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
@@ -120,7 +195,18 @@ public sealed class EuroPadServer : IAsyncDisposable
         }
 
         var slot = _slots!.Find(remote);
-        if (slot is null) return;
+        if (slot is null)
+        {
+            if ((frame.Flags & Proto.FlagConfig) != 0)
+                Console.WriteLine($"Config frame from {remote} dropped (no slot — connect first; phone retries)");
+            return;
+        }
+
+        if ((frame.Flags & Proto.FlagConfig) != 0)
+        {
+            HandleConfig(frame, slot, remote, now, socket);
+            return;
+        }
 
         ApplyInput(slot, frame, now);
 
@@ -130,6 +216,28 @@ public sealed class EuroPadServer : IAsyncDisposable
             FrameCodec.EncodePingReply(reply, frame.TimestampMs);
             TrySend(socket, reply, remote);
         }
+    }
+
+    /// <summary>
+    /// Config frames (flag bit 6) let the phone rewrite the active profile's keymap instead of
+    /// asking the user to hand-edit JSON on the PC. Payload: ButtonsLo[0]=kind, [1]=hi-bit index,
+    /// ButtonsHi..Axes = length-prefixed ASCII key name. Changes persist (ProfileManager write-through).
+    /// </summary>
+    private void HandleConfig(in InputFrame frame, SlotState slot, IPEndPoint remote, long now, UdpClient socket)
+    {
+        slot.LastPacketTicks = now;
+        var kind = frame.ButtonsLoRaw & 0xFF;
+        if (kind != Proto.CfgSetBitKey)
+        {
+            SendAck(slot.Slot, remote, socket);
+            return;
+        }
+
+        int bit = (frame.ButtonsLoRaw >> 8) & 0xFF;
+        string key = frame.PayloadText;
+        bool ok = key.Length > 0 && _profiles!.SetBitKey(bit, key);
+        Console.WriteLine($"Slot {slot.Slot} (P{slot.Slot + 1}) remap bit{bit} ({ProfileManager.HiBitNames[bit]}) -> '{key}' : {(ok ? "ok" : "ignored")}");
+        SendAck(slot.Slot, remote, socket);
     }
 
     private void HandleHello(in InputFrame frame, IPEndPoint remote, long now, UdpClient socket)
@@ -201,12 +309,7 @@ public sealed class EuroPadServer : IAsyncDisposable
         var pad = slot.Pad;
         if (pad is null) return;
 
-        bool axesChanged = frame.Axis(AxisIndex.Lx) != slot.PrevAxes[AxisIndex.Lx]
-                           || frame.Axis(AxisIndex.Ly) != slot.PrevAxes[AxisIndex.Ly]
-                           || frame.Axis(AxisIndex.Rx) != slot.PrevAxes[AxisIndex.Rx]
-                           || frame.Axis(AxisIndex.Ry) != slot.PrevAxes[AxisIndex.Ry]
-                           || frame.Axis(AxisIndex.Lt) != slot.PrevAxes[AxisIndex.Lt]
-                           || frame.Axis(AxisIndex.Rt) != slot.PrevAxes[AxisIndex.Rt];
+        bool axesChanged = !frame.Axes.AsSpan().SequenceEqual(slot.PrevAxes);
         bool loChanged = frame.ButtonsLoRaw != slot.ButtonsLoPrev;
         bool hiChanged = frame.ButtonsHiRaw != slot.ButtonsHiPrev;
 
@@ -215,12 +318,13 @@ public sealed class EuroPadServer : IAsyncDisposable
             if (loChanged) pad.SetButtonsFull(X360Mapper.ButtonsLoToXusbMask(frame.ButtonsLoRaw));
             if (axesChanged)
             {
-                pad.SetAxisValue(Xbox360AxisIds.LeftThumbX, (short)frame.Axis(AxisIndex.Lx));
-                pad.SetAxisValue(Xbox360AxisIds.LeftThumbY, (short)frame.Axis(AxisIndex.Ly));
-                pad.SetAxisValue(Xbox360AxisIds.RightThumbX, (short)frame.Axis(AxisIndex.Rx));
-                pad.SetAxisValue(Xbox360AxisIds.RightThumbY, (short)frame.Axis(AxisIndex.Ry));
-                pad.SetSliderValue(Xbox360SliderIds.LeftTrigger, X360Mapper.TriggerToByte((short)frame.Axis(AxisIndex.Lt)));
-                pad.SetSliderValue(Xbox360SliderIds.RightTrigger, X360Mapper.TriggerToByte((short)frame.Axis(AxisIndex.Rt)));
+                var routed = AxisRouter.Route(frame.Axes, _profiles!.ActiveRouting);
+                pad.SetAxisValue(Xbox360AxisIds.LeftThumbX, routed.Lx);
+                pad.SetAxisValue(Xbox360AxisIds.LeftThumbY, routed.Ly);
+                pad.SetAxisValue(Xbox360AxisIds.RightThumbX, routed.Rx);
+                pad.SetAxisValue(Xbox360AxisIds.RightThumbY, routed.Ry);
+                pad.SetSliderValue(Xbox360SliderIds.LeftTrigger, routed.LeftTrigger);
+                pad.SetSliderValue(Xbox360SliderIds.RightTrigger, routed.RightTrigger);
             }
             pad.SubmitReport();
         }
@@ -281,6 +385,8 @@ public sealed class EuroPadServer : IAsyncDisposable
                         TrySend(l, rumbleBuf, (IPEndPoint)slot.Remote!);
                     }
                     slot.LastRumbleSentTicks = now;
+                    if (_rumbleTrace)
+                        Console.WriteLine($"RUMBLE-TRACE {DateTime.Now:HH:mm:ss.fff} slot={slot.Slot} large={large} small={small} enq2send={now - slot.LastRumbleEnqueueTicks}ms");
                 }
             }
 
@@ -292,6 +398,7 @@ public sealed class EuroPadServer : IAsyncDisposable
     {
         _cts.Cancel();
         await _mdns.DisposeAsync();
+        _profiles?.Dispose();
         foreach (var l in _listeners) l.Dispose();
         if (_slots is not null)
         {

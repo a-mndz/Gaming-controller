@@ -76,6 +76,33 @@ public readonly struct InputFrame
 
     public bool IsHello => (Flags & Proto.FlagHello) != 0;
 
+    public bool IsConfig => (Flags & Proto.FlagConfig) != 0;
+
+    /// <summary>
+    /// Config-frame payload: ButtonsHi[0] = char count, ButtonsHi[1] + the 16 axis bytes carry the
+    /// ASCII characters (little-endian order). Max 17 chars — key names fit with room to spare.
+    /// </summary>
+    public string PayloadText
+    {
+        get
+        {
+            byte len = (byte)(ButtonsHiRaw & 0xFF);
+            if (len == 0 || len > 17) return string.Empty;
+            var chars = new System.Text.StringBuilder(len);
+            void Add(byte b)
+            {
+                if (b >= 0x20 && chars.Length < len) chars.Append((char)b);
+            }
+            Add((byte)(ButtonsHiRaw >> 8));
+            foreach (var axis in Axes)
+            {
+                Add((byte)(axis & 0xFF));
+                Add((byte)((axis >> 8) & 0xFF));
+            }
+            return chars.ToString();
+        }
+    }
+
     public int Pin => ButtonsLoRaw;
 
     public int Axis(int i) => (uint)i < (uint)Axes.Length ? Axes[i] : 0;

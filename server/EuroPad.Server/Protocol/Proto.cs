@@ -3,7 +3,7 @@ namespace EuroPad.Server.Protocol;
 public static class Proto
 {
     public const ushort Magic = 0x01E0;
-    public const byte Version = 1;
+    public const byte Version = 2;
     public const int FrameSize = 30;
     public const int AxesCount = 8;
 
@@ -15,6 +15,9 @@ public static class Proto
     public const byte FlagRumble = 1 << 3;
     public const byte FlagAck = 1 << 4;
     public const byte FlagReject = 1 << 5;
+    public const byte FlagConfig = 1 << 6;
+
+    public const byte CfgSetBitKey = 1;
 
     public const int OffMagic = 0;
     public const int OffVersion = 2;

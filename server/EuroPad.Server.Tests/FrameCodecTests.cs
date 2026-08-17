@@ -141,6 +141,49 @@ public class FrameCodecTests
         Assert.True(frame.IsHello);
         Assert.Equal(1234, frame.Pin);
     }
+
+    private static byte[] BuildConfigFrame(int bitIndex, string key)
+    {
+        var name = key.Length > 17 ? key[..17] : key;
+        ushort lo = (ushort)(Proto.CfgSetBitKey | ((bitIndex & 0xFF) << 8));
+        ushort hi = (ushort)(name.Length | ((name.Length == 0 ? 0 : name[0] & 0xFF) << 8));
+        var axes = new short[8];
+        for (int i = 0; i < 8; i++)
+        {
+            int loChar = 1 + i * 2 < name.Length ? name[1 + i * 2] & 0xFF : 0;
+            int hiChar = 2 + i * 2 < name.Length ? name[2 + i * 2] & 0xFF : 0;
+            axes[i] = (short)(loChar | (hiChar << 8));
+        }
+        return BuildFrame(Proto.FlagConfig, 42, 0, lo, hi, axes);
+    }
+
+    [Theory]
+    [InlineData(3, "X")]
+    [InlineData(0, "Space")]
+    [InlineData(15, "Ctrl")]
+    [InlineData(7, "F12")]
+    public void ConfigFrame_MirrorsPhoneEncoder(int bit, string key)
+    {
+        var buf = BuildConfigFrame(bit, key);
+        var result = FrameCodec.TryDecode(buf, out var frame);
+
+        Assert.Equal(DecodeResult.Ok, result);
+        Assert.True(frame.IsConfig);
+        Assert.Equal((ushort)Proto.CfgSetBitKey, (ushort)(frame.ButtonsLoRaw & 0xFF));
+        Assert.Equal(bit, frame.ButtonsLoRaw >> 8);
+        Assert.Equal(key, frame.PayloadText);
+    }
+
+    [Fact]
+    public void ConfigFrame_SeventeenCharMax()
+    {
+        var key = "ABCDEFGHIJKLMNOPQ"; // exactly 17
+        var buf = BuildConfigFrame(1, key);
+        var result = FrameCodec.TryDecode(buf, out var frame);
+
+        Assert.Equal(DecodeResult.Ok, result);
+        Assert.Equal(key, frame.PayloadText);
+    }
 }
 
 public class SeqCompareTests

@@ -12,14 +12,18 @@ public sealed class ProfileData
     public int SteerRange { get; set; } = 270;
 }
 
-public sealed class ProfileManager
+public sealed class ProfileManager : IDisposable
 {
     private readonly string _dir;
     private readonly FileSystemWatcher _watcher;
     private readonly object _gate = new();
     private readonly Dictionary<string, ProfileData> _byName = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, byte[]> _keysByBit = new(StringComparer.OrdinalIgnoreCase);
-    private string _activeName = "default";
+    private readonly Dictionary<string, AxisRouting> _routing = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _fileByName = new(StringComparer.OrdinalIgnoreCase);
+    private string _activeName = DefaultName;
+
+    public const string DefaultName = "default";
 
     public static readonly string[] HiBitNames =
     {
@@ -32,9 +36,11 @@ public sealed class ProfileManager
     {
         _dir = dir;
         Directory.CreateDirectory(dir);
+        // "default" must always exist: it is the fallback active profile, and a dir that
+        // contains only e.g. ets2.json must not leave Active/ActiveKeysByBit unresolvable.
+        LoadBuiltInDefault();
         CopySamples();
         LoadAll();
-        if (_byName.Count == 0) LoadBuiltInDefault();
 
         _watcher = new FileSystemWatcher(dir, "*.json") { EnableRaisingEvents = true };
         _watcher.Changed += (_, _) => LoadAll();
@@ -42,40 +48,96 @@ public sealed class ProfileManager
         _watcher.Deleted += (_, _) => LoadAll();
     }
 
+    public void Dispose() => _watcher.Dispose();
+
     public ProfileData Active
     {
-        get { lock (_gate) return _byName[_activeName]; }
+        get { lock (_gate) return _byName.TryGetValue(_activeName, out var p) ? p : _byName[DefaultName]; }
     }
 
     public byte[] ActiveKeysByBit
     {
-        get { lock (_gate) return _keysByBit[_activeName]; }
+        get { lock (_gate) return _keysByBit.TryGetValue(_activeName, out var k) ? k : _keysByBit[DefaultName]; }
     }
 
-    public void SetActive(string name) { lock (_gate) if (_byName.ContainsKey(name)) _activeName = name; }
+    public AxisRouting ActiveRouting
+    {
+        get { lock (_gate) return _routing.TryGetValue(_activeName, out var r) ? r : _routing[DefaultName]; }
+    }
+
+    public string ActiveName
+    {
+        get { lock (_gate) return _byName.ContainsKey(_activeName) ? _activeName : DefaultName; }
+    }
+
+    public bool SetActive(string name)
+    {
+        lock (_gate)
+        {
+            if (!_byName.ContainsKey(name)) return false;
+            _activeName = name;
+            return true;
+        }
+    }
+
+    public bool SetBitKey(int bit, string key)
+    {
+        if (bit < 0 || bit >= HiBitNames.Length) return false;
+        if (!VkLookup.TryGet(key, out _)) return false;
+
+        lock (_gate)
+        {
+            var name = _byName.ContainsKey(_activeName) ? _activeName : DefaultName;
+            var data = _byName[name];
+            data.Keys[HiBitNames[bit]] = key;
+            _keysByBit[name] = BuildKeysByBit(data);
+            WriteProfile(data, name);
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Persists a profile to its own file (the phone's remap panel writes through here). Built-in
+    /// "default" with no file yet lands in default.json so the edit survives restarts.
+    /// </summary>
+    private void WriteProfile(ProfileData data, string name)
+    {
+        try
+        {
+            var path = _fileByName.TryGetValue(name, out var p) ? p : Path.Combine(_dir, name + ".json");
+            _fileByName[name] = path;
+            File.WriteAllText(path, JsonSerializer.Serialize(data, WriteOpts), Encoding.UTF8);
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($"profile write failed ({name}): {e.Message}");
+        }
+    }
+
+    private static readonly JsonSerializerOptions WriteOpts = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true,
+    };
 
     public IReadOnlyCollection<string> Names
     {
         get { lock (_gate) return _byName.Keys.ToArray(); }
     }
 
-    private static readonly string[] SampleResourceNames =
-    {
-        "EuroPad.Server.Profiles.Samples.ets2.json",
-        "EuroPad.Server.Profiles.Samples.ats.json",
-    };
+    private const string SamplePrefix = "EuroPad.Server.Profiles.Samples.";
 
     private void CopySamples()
     {
         try
         {
             var asm = typeof(ProfileManager).Assembly;
-            foreach (var res in SampleResourceNames)
+            foreach (var res in asm.GetManifestResourceNames())
             {
+                if (!res.StartsWith(SamplePrefix, StringComparison.Ordinal)) continue;
                 using var stream = asm.GetManifestResourceStream(res);
                 if (stream is null) continue;
-                var name = res[(res.LastIndexOf('.', res.LastIndexOf('.') - 1))..].TrimStart('.');
-                var dest = Path.Combine(_dir, name);
+                var dest = Path.Combine(_dir, res[SamplePrefix.Length..]);
                 if (File.Exists(dest)) continue;
                 using var outStream = File.Create(dest);
                 stream.CopyTo(outStream);
@@ -88,29 +150,38 @@ public sealed class ProfileManager
 
     private void LoadAll()
     {
-        lock (_gate)
+        // Runs on FileSystemWatcher threadpool callbacks: an unhandled throw here (e.g. the dir
+        // was deleted between the event and the read) would kill the process, so swallow at the top.
+        try
         {
-            foreach (var file in Directory.GetFiles(_dir, "*.json"))
+            if (!Directory.Exists(_dir)) return;
+            lock (_gate)
             {
-                try
+                foreach (var file in Directory.GetFiles(_dir, "*.json"))
                 {
-                    var data = JsonSerializer.Deserialize<ProfileData>(File.ReadAllText(file, Encoding.UTF8), JsonOpts);
-                    if (data?.Name is not null)
+                    try
                     {
-                        _byName[data.Name] = data;
-                        _keysByBit[data.Name] = BuildKeysByBit(data);
+                        var data = JsonSerializer.Deserialize<ProfileData>(File.ReadAllText(file, Encoding.UTF8), JsonOpts);
+                        if (data?.Name is not null)
+                        {
+                            _byName[data.Name] = data;
+                            _keysByBit[data.Name] = BuildKeysByBit(data);
+                            _routing[data.Name] = AxisRouting.FromMap(data.AxisMap);
+                            _fileByName[data.Name] = file;
+                        }
                     }
+                    catch { }
                 }
-                catch { }
             }
         }
+        catch { }
     }
 
     private void LoadBuiltInDefault()
     {
         var p = new ProfileData
         {
-            Name = "default",
+            Name = DefaultName,
             Game = "Generic",
             Keys = new Dictionary<string, string>
             {
@@ -123,6 +194,7 @@ public sealed class ProfileManager
         };
         _byName[p.Name] = p;
         _keysByBit[p.Name] = BuildKeysByBit(p);
+        _routing[p.Name] = AxisRouting.FromMap(p.AxisMap);
     }
 
     private static byte[] BuildKeysByBit(ProfileData data)

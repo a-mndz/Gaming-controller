@@ -4,7 +4,7 @@ object Proto {
     const val MAGIC: Int = 0x01E0
     const val MAGIC_LO: Byte = 0xE0.toByte()
     const val MAGIC_HI: Byte = 0x01
-    const val VERSION: Byte = 1
+    const val VERSION: Byte = 2
     const val FRAME_SIZE = 30
     const val AXES_COUNT = 8
     const val DEFAULT_PORT = 47910
@@ -15,6 +15,9 @@ object Proto {
     const val FLAG_RUMBLE: Byte = 1 shl 3
     const val FLAG_ACK: Byte = 1 shl 4
     const val FLAG_REJECT: Byte = 1 shl 5
+    const val FLAG_CONFIG: Byte = 1 shl 6
+
+    const val CFG_SET_BIT_KEY: Byte = 1
 
     const val OFF_MAGIC = 0
     const val OFF_VERSION = 2

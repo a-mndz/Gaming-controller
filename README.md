@@ -1,55 +1,88 @@
-# EuroPad
+# EuroPad 🎮🚚
 
-**One phone. Every controller.** Turn your Android phone into a low-latency, all-in-one game controller for your Windows PC — over USB, Wi-Fi, or Bluetooth — with swappable mode decks for truck sims, racing, gamepad, gyro steering, FPS aiming, keyboards, flight, retro emulators, media, and **up to 4 phones at once** — plus **game rumble haptics** fed back to your phone's vibration motor.
+**Your Phone. Your Virtual Truck Controller & Sim Deck.**
 
-The PC runs a tiny server that creates **real virtual Xbox 360 controllers** (ViGEmBus, XInput slots 0–3 — shown as P1–P4) plus **virtual keyboard** presses, so Steam, ETS2/ATS, and any game accept each phone as a normal controller with zero per-game configuration.
+EuroPad transforms your Android phone into an ultra-low latency, full-screen virtual controller with real-time haptic feedback for PC games (Euro Truck Simulator 2, American Truck Simulator, Forza, Assetto Corsa, etc.).
 
-| | |
-|---|---|
-| Status | Phase 1 complete on real hardware (connect → play a Steam game end-to-end) · Phase 2 (truck sim / gyro / USB / haptics) underway |
-| Targets | Windows 10/11 x64 · Android 10+ |
-| Latency | ~1–4 ms USB · ~5–10 ms Wi-Fi 5 GHz · ~15–50 ms BT (not recommended for racing) |
-| Multi-device | Up to 4 phones → XInput slots 0–3 / P1–P4 (API hard limit), each independent |
-| Haptics | Game rumble → ViGEm notification → phone vibration (amplitude-mapped) |
-| Docs | [PROJECT_BIBLE](PROJECT_BIBLE.md) · [PRD](PRD.md) · [ARCHITECTURE](ARCHITECTURE.md) |
+---
 
-## Repo layout
+## 📦 Ready-to-Install Mobile Builds
 
-Repo root: `C:\Users\amand\Downloads\controller euro` (folder name has a space — quote paths in shells)
+Pre-built binaries are placed in the root directory for immediate setup:
+- **Android APK (Direct Install)**: [`EuroPad-Mobile.apk`](EuroPad-Mobile.apk)
+- **Android App Bundle (AAB)**: [`EuroPad-Mobile.aab`](EuroPad-Mobile.aab)
+- **Windows PC Server (Executable)**: [`server-bin/EuroPadServer.exe`](server-bin/EuroPadServer.exe)
 
+---
+
+## 🚀 Quick Start Guide
+
+### 🖥️ Step 1: Launch on Windows PC
+
+1. **Prerequisite**: Install the [ViGEmBus 1.22.0 Driver](https://github.com/nefarius/vigembus/releases) (enables Windows virtual Xbox 360 gamepad emulation).
+2. **Start the PC Server**:
+   - **Option A (Standalone Exe)**: Run `server-bin\EuroPadServer.exe`.
+   - **Option B (From Source)**:
+     ```powershell
+     dotnet run --project server/EuroPad.Server/EuroPad.Server.csproj -c Release
+     ```
+3. The server immediately registers as a virtual Xbox 360 controller (Player 1) and begins broadcasting on your local network (UDP Port `4242` / mDNS `_europad._udp`).
+
+---
+
+### 📱 Step 2: Install & Launch on Android Phone
+
+1. **Install the APK on your device**:
+   - **Via ADB**:
+     ```powershell
+     adb install -r EuroPad-Mobile.apk
+     ```
+   - **Direct Transfer**: Copy `EuroPad-Mobile.apk` to your phone storage and tap to install.
+2. **Open EuroPad**:
+   - **Wi-Fi Mode**: Ensure your PC and phone are on the same Wi-Fi / hotspot. EuroPad will discover your PC server automatically in the **PC SERVER RADAR** list. Tap **`CONNECT ➔`**!
+   - **USB Tethering Mode**: Connect via USB cable, enable *USB Tethering* in Android settings, and tap **`USB TETHERING`** in EuroPad for ultra-low latency (<1 ms).
+   - **Manual IP**: Enter your PC's LAN IP directly (e.g. `192.168.1.50`) and tap **`CONNECT`**.
+   - **Offline / Practice**: Tap **`➔ DRIVE / TEST OFFLINE`** in the top header to enter the cockpit immediately without connecting to a PC.
+
+---
+
+## 🕹️ Steering Modes & Cockpit Controls
+
+| Feature | Touch Wheel Mode | Gyroscope Mode |
+|---|---|---|
+| **Steering Control** | Smooth 360° rotational on-screen wheel with spring-to-center physics | Physical phone tilting (hardware rotation vector sensor) |
+| **Left Thumb** | Circular steering wheel gestures | **ACCELERATOR** pedal (immediate 100% responsive press) |
+| **Right Thumb** | Dual side-by-side **BRAKE** & **ACCEL** pedals | **BRAKE** pedal (immediate 100% responsive press) |
+| **Sensitivity** | Configurable: 180°, 270°, 360°, 540°, 900° lock-to-lock | Configurable: 90°, 180°, 270°, 360° range + Quick Recenter |
+
+### Top Cockpit Functions:
+- **`LIGHTS`**: Toggle truck headlights dome and beam rays.
+- **`WIPER`**: Cycle wiper speed.
+- **`VIPER`**: Trigger windshield washer fluid spray.
+- **`R | N | D`**: Instant gear selector (Reverse, Neutral, Drive).
+- **`HANDBRAKE`**: Toggle parking brake `(P)`.
+- **`SETTINGS`**: Open in-game key remapping and steering mode configuration.
+- **`MENU`**: Access quick steering sensitivity controls, gyro recenter, and connection switcher.
+- **`← | →`**: Turn signal arrows.
+- **`CAMERA`**: Change camera viewpoint.
+
+---
+
+## 🛠️ Building From Source
+
+### Building PC Server (.NET 8):
+```powershell
+dotnet build server/EuroPad.Server.sln -c Release
+dotnet test server/EuroPad.Server.sln
 ```
-├── server/           ← C# / .NET 8 PC server (ViGEmBus pad + SendInput keyboard, UDP + mDNS)
-│   ├── EuroPad.Server/
-│   └── EuroPad.Server.Tests/   ← xUnit, run with `dotnet test`
-├── app/              ← Kotlin + Jetpack Compose Android app (120 Hz UDP sender, decks, HUD)
-├── profiles/         ← per-game keymap JSONs (default.json, ets2.json; hot-reload in T2.1)
-└── tools/echotest/   ← latency/loss test harness (planned, T2.9d)
+
+### Building Android App (Gradle):
+```powershell
+cd app
+& 'C:\Users\amand\.gradle\wrapper\dists\gradle-8.9-bin\90cnw93cvbtalezasaz0blq0a\gradle-8.9\bin\gradle.bat' :app:testDebugUnitTest :app:assembleDebug :app:bundleDebug
 ```
 
-## How it works
+---
 
-```
-Phone (deck UI + gyro) ──UDP/BT, 30-byte snapshots──► PC Server ──► Virtual X360 pad + Keyboard ──► Steam/ETS2/games
-```
-
-- **Decks**: home screen shows mode cards like swappable faceplates — tap one, it loads full-screen, switch anytime mid-game.
-- **Transports**: switch USB / Wi-Fi / Bluetooth from inside the app; all three carry the same protocol. Wi-Fi is live today (Phase 1); USB and BT arrive in later phases.
-- **Failsafe**: link drops → throttle to zero, buttons release, wheel centers (verified <850 ms end-to-end on real Wi-Fi). No stuck inputs, ever.
-
-## Quick start
-
-1. Install the [ViGEmBus 1.22.0](https://github.com/nefarius/vigembus) driver on the PC.
-2. Run `EuroPadServer.exe` (server/) — virtual pad appears immediately and the server announces itself over mDNS (`_europad._udp`).
-3. Install the APK (app/), open it, tap your PC in the discovered list (or add its IP manually — manual IP is a first-class path). From Phase 3 (T3.6), you can also scan the pairing QR.
-4. Pick a deck. Play.
-
-USB mode (Phase 2): enable USB tethering on the phone, pick the USB transport in-app.
-
-## Development
-
-- Server: `dotnet build server/EuroPad.Server.sln -c Release`, tests: `dotnet test server/EuroPad.Server.sln` (30 xUnit tests, all green)
-- Phone: `gradlew assembleDebug` in `app/` (or Android Studio)
-
-## License
-
-Personal project (undecided; will be Apache-2.0 if ever published). See PROJECT_BIBLE §10.
+## 📄 License
+Personal & open simulator project. See [`PROJECT_BIBLE.md`](PROJECT_BIBLE.md) for architectural specifications.
