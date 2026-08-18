@@ -3,10 +3,12 @@ package com.europad.app.ui
 import android.content.SharedPreferences
 import android.graphics.Paint
 import android.graphics.Typeface
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -62,10 +64,14 @@ import com.europad.app.input.ButtonLo
 import com.europad.app.input.DeckEngine
 import com.europad.app.input.GyroSteering
 import com.europad.app.input.InputFrame
+import com.europad.app.input.PedalStage
 import com.europad.app.net.ConnState
+import com.europad.app.net.FrameEncoder
 import com.europad.app.net.UdpTransport
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.roundToInt
@@ -87,7 +93,6 @@ fun TruckDeck2(
     val deck = remember(transport) {
         DeckEngine(transport, scope).also { it.startSender(120) }
     }
-    DisposableEffect(transport) { onDispose { deck.stopSender() } }
 
     var mode by remember { mutableStateOf(prefs.getString("truckMode", null) ?: "wheel") }
     var keymap by remember { mutableStateOf(loadKeymap(prefs)) }
@@ -97,9 +102,25 @@ fun TruckDeck2(
     var gear by remember { mutableStateOf("D") }
 
     val gyro = remember { GyroSteering(context) }
+
+    // Leaving the deck must not leave the truck driving itself. stopSender() ends the stream and
+    // neutralize() pushes an explicit all-zero frame, because the server latches the last snapshot it
+    // received until its failsafe fires — going quiet alone would hold the live steering angle,
+    // pedal and keys for the whole failsafe window. gyro.stop() releases the sensor: the deck used to
+    // unregister it only on a mode change, so closing the deck in gyro mode left the accelerometer
+    // callback (and its wakeups) running for the life of the process.
+    DisposableEffect(transport) {
+        onDispose {
+            deck.stopSender()
+            deck.neutralize()
+            gyro.stop()
+        }
+    }
+
     var gyroFailed by remember { mutableStateOf(false) }
     var steer by remember { mutableFloatStateOf(0f) }
     var wheelRangeDeg by remember { mutableStateOf(prefs.getInt("wheelRange", 360)) }
+    var wheelReturnMs by remember { mutableIntStateOf(prefs.getInt("wheelReturnMs", 250)) }
     var gyroRangeDeg by remember { mutableStateOf(prefs.getInt("gyroRange", 180)) }
     var deadzone by remember { mutableFloatStateOf(0.05f) }
     gyro.rangeDeg = gyroRangeDeg.toFloat()
@@ -117,6 +138,7 @@ fun TruckDeck2(
     LaunchedEffect(mode) {
         if (mode != "gyro") {
             gyro.stop()
+            setSteer(0f) // stopping the sensor never zeroed the axis: the last tilt stayed latched
             return@LaunchedEffect
         }
         if (!gyro.start()) {
@@ -135,11 +157,31 @@ fun TruckDeck2(
     var rtt by remember { mutableLongStateOf(-1L) }
     var loss by remember { mutableIntStateOf(0) }
     var reconnecting by remember { mutableStateOf(false) }
+    // Bindings the phone saved but has not yet managed to push over a live link.
+    var pendingKeys by remember { mutableStateOf(emptySet<String>()) }
+    var sentKeys by remember { mutableStateOf(emptySet<String>()) }
     LaunchedEffect(transport) {
+        var wasConnected = false
         while (true) {
             rtt = transport.rtt
             loss = transport.lossPercent
             reconnecting = transport.state == ConnState.Reconnecting
+            // A one-shot remap frame is lost for good if it left during a Wi-Fi stall or with no
+            // slot assigned, and nothing ever re-pushed it — the phone showed the new key while the
+            // game kept the old one. Re-push every binding on each fresh Connected: the server
+            // rewrite is idempotent, a slot definitely exists (the ACK just arrived), and it repairs
+            // bindings lost to *any* earlier stall, not just the last one touched.
+            val connected = transport.state == ConnState.Connected
+            if (connected && !wasConnected) {
+                for ((idx, name) in TruckKeys.names.withIndex()) {
+                    val key = keymap[name]
+                    if (!key.isNullOrEmpty()) transport.sendConfig(FrameEncoder.encodeSetBitKey(idx, key))
+                    delay(20)
+                }
+                sentKeys = sentKeys + pendingKeys
+                pendingKeys = emptySet()
+            }
+            wasConnected = connected
             delay(250)
         }
     }
@@ -159,17 +201,35 @@ fun TruckDeck2(
         }
     }
 
+    /**
+     * ETS2 gear keys are relative steps, so R-N-D needs one press per step in the right direction
+     * (D→R is Ctrl twice, not one Ctrl) and GEAR_UP+GEAR_DN together means nothing at all. Each
+     * press is pulsed separately so the server's edge-triggered keyboard emulation sees them as
+     * distinct presses, and [gear] only advances once they are all out.
+     */
     fun selectGear(g: String) {
         if (gearBusy) return
+        val (up, presses) = GearShift.plan(gear, g) ?: return
+        tick()
+        gearBusy = true
+        val bit = if (up) ButtonHi.GEAR_UP else ButtonHi.GEAR_DN
+        scope.launch {
+            repeat(presses) {
+                deck.setInput { setHi(it, bit, true) }
+                delay(90)
+                deck.setInput { setHi(it, bit, false) }
+                delay(110)
+            }
+            gear = g
+            gearBusy = false
+        }
+    }
+
+    /** Long-press: the app cannot see the truck's real gear, so let the user declare it silently. */
+    fun declareGear(g: String) {
+        if (gearBusy || g == gear) return
         tick()
         gear = g
-        val bits = when (g) {
-            "R" -> ButtonHi.GEAR_DN
-            "N" -> ButtonHi.GEAR_UP or ButtonHi.GEAR_DN
-            else -> ButtonHi.GEAR_UP
-        }
-        val ms = if (g == "N") 250L else 200L
-        tapHi(bits, ms, { gearBusy }, { gearBusy = it })
     }
 
     if (showKeys) {
@@ -180,6 +240,13 @@ fun TruckDeck2(
             mode = mode,
             wheelRangeDeg = wheelRangeDeg,
             gyroRangeDeg = gyroRangeDeg,
+            returnMs = wheelReturnMs,
+            pendingKeys = pendingKeys,
+            sentKeys = sentKeys,
+            onReturnMs = { ms ->
+                wheelReturnMs = ms
+                prefs.edit().putInt("wheelReturnMs", ms).apply()
+            },
             onToggleMode = {
                 if (!(mode == "wheel" && gyroFailed)) {
                     tick()
@@ -198,7 +265,17 @@ fun TruckDeck2(
                 gyro.rangeDeg = gyroRangeDeg.toFloat()
                 prefs.edit().putInt("gyroRange", gyroRangeDeg).apply()
             },
-            onRemap = { action, key -> keymap = (keymap + (action to key)).toMutableMap() },
+            onRemap = { action, key ->
+                keymap = (keymap + (action to key)).toMutableMap()
+                // KeymapPanel already fired the config frame; amber until a live link carried it.
+                if (transport.state == ConnState.Connected) {
+                    sentKeys = sentKeys + action
+                    pendingKeys = pendingKeys - action
+                } else {
+                    pendingKeys = pendingKeys + action
+                    sentKeys = sentKeys - action
+                }
+            },
             onClose = { showKeys = false },
             onDisconnect = {
                 transport.close()
@@ -208,61 +285,6 @@ fun TruckDeck2(
                 tick()
                 showKeys = false
                 showEditLayout = true
-            },
-        )
-        return
-    }
-    
-    if (showEditLayout) {
-        val aspect = remember { 16f / 9f } // Use standard aspect for edit mode
-        
-        // Create default positions map from DeckLayout for all elements in current mode
-        val defaultPositions = remember(mode, aspect) {
-            buildMap {
-                put("LIGHTS", DeckLayout.utilBtn(0, aspect))
-                put("WIPER", DeckLayout.utilBtn(1, aspect))
-                put("VIPER", DeckLayout.utilBtn(2, aspect))
-                put("HANDBRAKE", DeckLayout.topRightBtn(0, aspect))
-                put("SETTINGS", DeckLayout.topRightBtn(1, aspect))
-                put("MENU", DeckLayout.topRightBtn(2, aspect))
-                put("CAMERA", DeckLayout.camera(aspect))
-                put("GEAR", DeckLayout.gearSel())
-                put("INDICATORS", DeckLayout.arrows())
-                
-                if (mode == "gyro") {
-                    put("GYRO_ACCEL", DeckLayout.gyroAccel())
-                    put("GYRO_BRAKE", DeckLayout.gyroBrake())
-                } else {
-                    put("WHEEL", DeckLayout.wheel(aspect))
-                    put("BRAKE", DeckLayout.brake())
-                    put("ACCEL", DeckLayout.accel())
-                }
-            }
-        }
-        
-        // Load current custom positions (or empty map if none exist)
-        val currentCustomPositions = remember(mode) {
-            LayoutPreferences.load(prefs, mode) ?: emptyMap()
-        }
-        
-        LayoutEditPanel(
-            prefs = prefs,
-            mode = mode,
-            defaultPositions = defaultPositions,
-            customPositions = currentCustomPositions,
-            onSave = { newPositions ->
-                tick()
-                LayoutPreferences.save(prefs, mode, newPositions)
-                showEditLayout = false
-            },
-            onReset = {
-                tick()
-                LayoutPreferences.clear(prefs, mode)
-                showEditLayout = false
-            },
-            onCancel = {
-                tick()
-                showEditLayout = false
             },
         )
         return
@@ -277,45 +299,76 @@ fun TruckDeck2(
         val innerW = maxWidth - pad * 2
         val innerH = maxHeight - pad * 2
         val aspect = if (innerH > 0.dp) innerW / innerH else DeckLayout.ASPECT
-        
-        // Load custom positions for the current mode, falling back to null if corrupted/missing
-        val customPositions = remember(mode) {
-            LayoutPreferences.load(prefs, mode)
+
+        // Reassigned on SAVE/RESET so a saved layout applies the moment the editor closes, instead
+        // of only after an app restart.
+        var customPositions by remember(mode) { mutableStateOf(LayoutPreferences.load(prefs, mode)) }
+
+        // Defaults computed from the *real* aspect the deck renders with — the editor used to
+        // hard-code 16:9 and a full-screen canvas, so saved positions landed somewhere else.
+        val defaultPositions = remember(mode, aspect) {
+            val m = mutableMapOf<String, DeckRect>()
+            m["LIGHTS"] = DeckLayout.utilBtn(0, aspect)
+            m["WIPER"] = DeckLayout.utilBtn(1, aspect)
+            m["VIPER"] = DeckLayout.utilBtn(2, aspect)
+            m["HANDBRAKE"] = DeckLayout.topRightBtn(0, aspect)
+            m["SETTINGS"] = DeckLayout.topRightBtn(1, aspect)
+            m["MENU"] = DeckLayout.topRightBtn(2, aspect)
+            m["CAMERA"] = DeckLayout.camera(aspect)
+            m["GEAR"] = DeckLayout.gearSel()
+            m["INDICATORS"] = DeckLayout.arrows()
+            if (mode == "gyro") {
+                m["GYRO_ACCEL"] = DeckLayout.gyroAccel()
+                m["GYRO_BRAKE"] = DeckLayout.gyroBrake()
+            } else {
+                m["WHEEL"] = DeckLayout.wheel(aspect)
+                m["BRAKE"] = DeckLayout.brake()
+                m["ACCEL"] = DeckLayout.accel()
+            }
+            m.mapValues { (id, r) -> ElementPosition.fromDeckRect(id, r) }
         }
-        
-        /**
-         * Get the position rectangle for an element, checking custom positions first,
-         * then falling back to default DeckLayout positions.
-         */
-        fun getElementRect(id: String, defaultRect: DeckRect): DeckRect {
-            return customPositions?.get(id)?.toDeckRect() ?: defaultRect
+
+        // Defaults first so a layout saved in another mode/version can't drop an element.
+        val editBaseline = remember(defaultPositions, customPositions) {
+            defaultPositions + (customPositions ?: emptyMap()).filterKeys { it in defaultPositions }
         }
-        
-        fun place(r: DeckRect) = Modifier
-            .offset(x = pad + innerW * r.left, y = pad + innerH * r.top)
-            .size(width = innerW * r.w, height = innerH * r.h)
+        // null = nothing edited yet, so entering the editor shows the saved layout on the first
+        // frame and RESET/CANCEL is just "forget the edits".
+        var editPositions by remember { mutableStateOf<Map<String, ElementPosition>?>(null) }
+        val livePositions = editPositions ?: editBaseline
+
+        /** Editing shows the in-progress map, so the live deck moves with the handles. */
+        fun place(id: String, default: DeckRect): Modifier {
+            val r = when {
+                showEditLayout -> livePositions[id]?.toDeckRect() ?: default
+                else -> customPositions?.get(id)?.toDeckRect() ?: default
+            }
+            return Modifier
+                .offset(x = pad + innerW * r.left, y = pad + innerH * r.top)
+                .size(width = innerW * r.w, height = innerH * r.h)
+        }
 
         UtilButton(
             label = "LIGHTS", description = "pad:LIGHTS", tint = PitWall.ButtonLabel,
-            modifier = place(getElementRect("LIGHTS", DeckLayout.utilBtn(0, aspect))),
+            modifier = place("LIGHTS", DeckLayout.utilBtn(0, aspect)),
             onPress = { on -> deck.setInput { setHi(it, ButtonHi.LIGHTS, on) } },
         ) { tint, m -> DeckIcons.lights(tint, m) }
         UtilButton(
             label = "WIPER", description = "pad:WIPER", tint = PitWall.ButtonLabel,
-            modifier = place(getElementRect("WIPER", DeckLayout.utilBtn(1, aspect))),
+            modifier = place("WIPER", DeckLayout.utilBtn(1, aspect)),
             onPress = { down -> if (down) tapHi(ButtonHi.WIPERS, 120, { wiperBusy }, { wiperBusy = it }) },
         ) { tint, m -> DeckIcons.wiper(tint, m) }
         UtilButton(
             label = "VIPER", description = "pad:VIPER", tint = PitWall.ButtonLabel,
-            modifier = place(getElementRect("VIPER", DeckLayout.utilBtn(2, aspect))),
+            modifier = place("VIPER", DeckLayout.utilBtn(2, aspect)),
             onPress = { down -> if (down) tapHi(ButtonHi.WIPERS, 700, { washerBusy }, { washerBusy = it }) },
         ) { tint, m -> DeckIcons.viper(tint, m) }
 
-        GearSelector(gear, ::selectGear, place(getElementRect("GEAR", DeckLayout.gearSel())))
+        GearSelector(gear, ::selectGear, ::declareGear, place("GEAR", DeckLayout.gearSel()))
 
         UtilButton(
             label = "HANDBRAKE", description = "pad:HANDBRAKE", tint = PitWall.SignalRed,
-            modifier = place(getElementRect("HANDBRAKE", DeckLayout.topRightBtn(0, aspect))),
+            modifier = place("HANDBRAKE", DeckLayout.topRightBtn(0, aspect)),
             isTransparent = true,
             labelColor = PitWall.SignalRed,
             onPress = { on -> deck.setInput { setHi(it, ButtonHi.HANDBRAKE, on) } },
@@ -323,21 +376,21 @@ fun TruckDeck2(
 
         UtilButton(
             label = "SETTINGS", description = "pad:SETTINGS", tint = PitWall.ButtonLabel,
-            modifier = place(getElementRect("SETTINGS", DeckLayout.topRightBtn(1, aspect))),
+            modifier = place("SETTINGS", DeckLayout.topRightBtn(1, aspect)),
             onPress = { showKeys = true },
         ) { tint, m -> DeckIcons.gearWheel(tint, m) }
 
         UtilButton(
             label = "MENU", description = "pad:MENU", tint = PitWall.ButtonLabel,
-            modifier = place(getElementRect("MENU", DeckLayout.topRightBtn(2, aspect))),
+            modifier = place("MENU", DeckLayout.topRightBtn(2, aspect)),
             onPress = { showMenu = true },
         ) { tint, m -> DeckIcons.bars(tint, m) }
 
-        SignalPair(deck, ::tick, place(getElementRect("INDICATORS", DeckLayout.arrows())))
+        SignalPair(deck, ::tick, place("INDICATORS", DeckLayout.arrows()))
 
         UtilButton(
             label = "CAMERA", description = "pad:CAMERA", tint = PitWall.ButtonLabel,
-            modifier = place(getElementRect("CAMERA", DeckLayout.camera(aspect))),
+            modifier = place("CAMERA", DeckLayout.camera(aspect)),
             onPress = { down ->
                 if (down) tick()
                 deck.setInput { setLo(it, ButtonLo.BACK, down) }
@@ -351,7 +404,7 @@ fun TruckDeck2(
                 tick = ::tick,
                 axis = AX_RT,
                 ridgeCount = 8,
-                modifier = place(getElementRect("GYRO_ACCEL", DeckLayout.gyroAccel())),
+                modifier = place("GYRO_ACCEL", DeckLayout.gyroAccel()),
             )
             MetallicPedal(
                 label = "BRAKE",
@@ -359,21 +412,57 @@ fun TruckDeck2(
                 tick = ::tick,
                 axis = AX_LT,
                 ridgeCount = 6,
-                modifier = place(getElementRect("GYRO_BRAKE", DeckLayout.gyroBrake())),
+                modifier = place("GYRO_BRAKE", DeckLayout.gyroBrake()),
+                stageMs = PedalStage.BRAKE_STAGE_MS,
             )
         } else {
             WheelControl(
-                steer = steer,
                 wheelRangeDeg = wheelRangeDeg,
-                gyroOn = false,
+                returnMs = wheelReturnMs,
                 onSteer = ::setSteer,
-                onRecenter = { },
                 tick = ::tick,
-                modifier = place(getElementRect("WHEEL", DeckLayout.wheel(aspect))),
+                modifier = place("WHEEL", DeckLayout.wheel(aspect)),
             )
 
-            MetallicPedal("BRAKE", deck, ::tick, AX_LT, ridgeCount = 5, modifier = place(getElementRect("BRAKE", DeckLayout.brake())))
-            MetallicPedal("ACCELERATOR", deck, ::tick, AX_RT, ridgeCount = 8, modifier = place(getElementRect("ACCEL", DeckLayout.accel())))
+            MetallicPedal(
+                "BRAKE", deck, ::tick, AX_LT, ridgeCount = 5,
+                modifier = place("BRAKE", DeckLayout.brake()),
+                stageMs = PedalStage.BRAKE_STAGE_MS,
+            )
+            MetallicPedal("ACCELERATOR", deck, ::tick, AX_RT, ridgeCount = 8, modifier = place("ACCEL", DeckLayout.accel()))
+        }
+
+        // Last child, so the handles sit above the real controls and swallow their input.
+        if (showEditLayout) {
+            LayoutEditOverlay(
+                prefs = prefs,
+                mode = mode,
+                positions = livePositions,
+                pad = pad,
+                innerW = innerW,
+                innerH = innerH,
+                hasChanges = editPositions != null,
+                onChange = { id, p -> editPositions = livePositions + (id to p) },
+                onSave = {
+                    tick()
+                    LayoutPreferences.save(prefs, mode, livePositions)
+                    customPositions = livePositions
+                    editPositions = null
+                    showEditLayout = false
+                },
+                onReset = {
+                    // Applies defaults in place and stays in the editor — it used to exit immediately.
+                    tick()
+                    LayoutPreferences.clear(prefs, mode)
+                    customPositions = null
+                    editPositions = null
+                },
+                onCancel = {
+                    tick()
+                    editPositions = null
+                    showEditLayout = false
+                },
+            )
         }
 
         if (showMenu) {
@@ -482,7 +571,12 @@ private fun UtilButton(
 }
 
 @Composable
-private fun GearSelector(gear: String, onSelect: (String) -> Unit, modifier: Modifier) {
+private fun GearSelector(
+    gear: String,
+    onSelect: (String) -> Unit,
+    onDeclare: (String) -> Unit,
+    modifier: Modifier,
+) {
     val shape = RoundedCornerShape(8.dp)
     Row(
         modifier = modifier
@@ -512,7 +606,14 @@ private fun GearSelector(gear: String, onSelect: (String) -> Unit, modifier: Mod
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight()
-                    .clickable { onSelect(g) },
+                    // Long-press declares the truck's real gear without sending keys, for when the
+                    // app's idea of the gear and the game's have drifted apart.
+                    .pointerInput(g) {
+                        detectTapGestures(
+                            onTap = { onSelect(g) },
+                            onLongPress = { onDeclare(g) },
+                        )
+                    },
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
@@ -584,89 +685,87 @@ private fun SignalSeg(bit: Int, pointRight: Boolean, deck: DeckEngine, tick: () 
 
 @Composable
 private fun WheelControl(
-    steer: Float,
     wheelRangeDeg: Int = 360,
-    gyroOn: Boolean,
+    returnMs: Int,
     onSteer: (Float) -> Unit,
-    onRecenter: () -> Unit,
     tick: () -> Unit,
     modifier: Modifier,
 ) {
     val coroutineScope = rememberCoroutineScope()
     var currentAngleDeg by remember { mutableFloatStateOf(0f) }
-    val animatedAngle = remember { androidx.compose.animation.core.Animatable(0f) }
+    val animatedAngle = remember { Animatable(0f) }
     val maxTurnDeg = (wheelRangeDeg / 2f).coerceIn(90f, 450f)
+    // Held so a re-grab can cancel the return synchronously instead of racing it.
+    var returnJob by remember { mutableStateOf<Job?>(null) }
+    var dragging by remember { mutableStateOf(false) }
 
-    LaunchedEffect(steer, gyroOn) {
-        if (gyroOn) {
-            currentAngleDeg = steer * 180f
+    fun returnToCenter() {
+        returnJob?.cancel()
+        returnJob = coroutineScope.launch {
+            animatedAngle.snapTo(currentAngleDeg)
+            // tween, not spring: an under-damped spring overshot through 0 (the truck counter-steered)
+            // and StiffnessLow took ~1.5 s, so the axis was still swinging long after the graphic
+            // looked centred. Monotonic, ends at exactly 0, and the user picks the duration.
+            animatedAngle.animateTo(0f, tween(returnMs, easing = FastOutSlowInEasing)) {
+                if (!dragging) {
+                    currentAngleDeg = value
+                    onSteer((currentAngleDeg / maxTurnDeg).coerceIn(-1f, 1f))
+                }
+            }
+            // Guarantees the final axis value even if the animation was cut short.
+            if (!dragging) {
+                currentAngleDeg = 0f
+                onSteer(0f)
+            }
         }
     }
 
     Box(
         modifier = modifier
             .semantics { contentDescription = "pad:WHEEL" }
-            .pointerInput(gyroOn, wheelRangeDeg) {
-                if (gyroOn) {
-                    detectTapGestures(onTap = {
+            .pointerInput(wheelRangeDeg) {
+                // Pivot is read per gesture, not captured once: the layout editor can move or resize
+                // the wheel without changing wheelRangeDeg, so a captured centre goes stale and the
+                // whole rotation is measured about the wrong point (tiny angular travel, so the wheel
+                // never reaches full lock). `size` on the pointer scope always reflects the last
+                // measure pass.
+                var cx = 0f
+                var cy = 0f
+                var lastAngleRad = 0.0
+
+                detectDragGestures(
+                    onDragStart = { off ->
                         tick()
-                        onRecenter()
-                    })
-                } else {
-                    val cx = size.width / 2f
-                    val cy = size.height / 2f
-                    var lastAngleRad = 0.0
+                        cx = size.width / 2f
+                        cy = size.height / 2f
+                        // Cancel here, not inside a fresh coroutine: the old animation used to keep
+                        // writing currentAngleDeg/onSteer while the finger was already dragging.
+                        dragging = true
+                        returnJob?.cancel()
+                        returnJob = null
+                        lastAngleRad = kotlin.math.atan2((off.y - cy).toDouble(), (off.x - cx).toDouble())
+                    },
+                    onDrag = { change, _ ->
+                        change.consume()
+                        val curAngleRad = kotlin.math.atan2((change.position.y - cy).toDouble(), (change.position.x - cx).toDouble())
+                        var diffRad = curAngleRad - lastAngleRad
+                        while (diffRad > PI) diffRad -= 2 * PI
+                        while (diffRad < -PI) diffRad += 2 * PI
 
-                    detectDragGestures(
-                        onDragStart = { off ->
-                            tick()
-                            coroutineScope.launch { animatedAngle.stop() }
-                            lastAngleRad = kotlin.math.atan2((off.y - cy).toDouble(), (off.x - cx).toDouble())
-                        },
-                        onDrag = { change, _ ->
-                            change.consume()
-                            val curAngleRad = kotlin.math.atan2((change.position.y - cy).toDouble(), (change.position.x - cx).toDouble())
-                            var diffRad = curAngleRad - lastAngleRad
-                            while (diffRad > PI) diffRad -= 2 * PI
-                            while (diffRad < -PI) diffRad += 2 * PI
-
-                            val diffDeg = (diffRad * 180.0 / PI).toFloat()
-                            currentAngleDeg = (currentAngleDeg + diffDeg).coerceIn(-maxTurnDeg, maxTurnDeg)
-                            lastAngleRad = curAngleRad
-                            onSteer((currentAngleDeg / maxTurnDeg).coerceIn(-1f, 1f))
-                        },
-                        onDragEnd = {
-                            coroutineScope.launch {
-                                animatedAngle.snapTo(currentAngleDeg)
-                                animatedAngle.animateTo(
-                                    targetValue = 0f,
-                                    animationSpec = androidx.compose.animation.core.spring(
-                                        dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
-                                        stiffness = androidx.compose.animation.core.Spring.StiffnessLow,
-                                    ),
-                                ) {
-                                    currentAngleDeg = value
-                                    onSteer((currentAngleDeg / maxTurnDeg).coerceIn(-1f, 1f))
-                                }
-                            }
-                        },
-                        onDragCancel = {
-                            coroutineScope.launch {
-                                animatedAngle.snapTo(currentAngleDeg)
-                                animatedAngle.animateTo(
-                                    targetValue = 0f,
-                                    animationSpec = androidx.compose.animation.core.spring(
-                                        dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
-                                        stiffness = androidx.compose.animation.core.Spring.StiffnessLow,
-                                    ),
-                                ) {
-                                    currentAngleDeg = value
-                                    onSteer((currentAngleDeg / maxTurnDeg).coerceIn(-1f, 1f))
-                                }
-                            }
-                        },
-                    )
-                }
+                        val diffDeg = (diffRad * 180.0 / PI).toFloat()
+                        currentAngleDeg = (currentAngleDeg + diffDeg).coerceIn(-maxTurnDeg, maxTurnDeg)
+                        lastAngleRad = curAngleRad
+                        onSteer((currentAngleDeg / maxTurnDeg).coerceIn(-1f, 1f))
+                    },
+                    onDragEnd = {
+                        dragging = false
+                        returnToCenter()
+                    },
+                    onDragCancel = {
+                        dragging = false
+                        returnToCenter()
+                    },
+                )
             },
     ) {
         Canvas(Modifier.fillMaxSize()) {
@@ -676,8 +775,7 @@ private fun WheelControl(
             val hubRadius = r * 0.35f
             val innerRimRadius = r - glowWidth - rimThickness
 
-            val displayAngle = if (gyroOn) steer * 180f else currentAngleDeg
-            rotate(displayAngle) {
+            rotate(currentAngleDeg) {
                 drawCircle(
                     color = PitWall.WheelGlow,
                     radius = r - glowWidth / 2f,
@@ -785,6 +883,9 @@ private fun MetallicPedal(
     axis: Int,
     ridgeCount: Int = 6,
     modifier: Modifier,
+    /** >0 turns this pedal two-stage: [firstLevel] until the hold passes this, then full. */
+    stageMs: Long = 0L,
+    firstLevel: Float = PedalStage.BRAKE_FIRST_LEVEL,
 ) {
     var down by remember { mutableStateOf(false) }
     val animatedValue = remember { androidx.compose.animation.core.Animatable(0f) }
@@ -796,14 +897,30 @@ private fun MetallicPedal(
                 .fillMaxSize()
                 .clip(RoundedCornerShape(10.dp))
                 .semantics { contentDescription = "pad:$label" }
-                .pointerInput(axis) {
+                .pointerInput(axis, stageMs) {
                     detectTapGestures(
                         onPress = {
                             down = true
                             tick()
-                            deck.setInput { it.axes[axis] = Short.MAX_VALUE }
-                            coroutineScope.launch { animatedValue.animateTo(1f, androidx.compose.animation.core.tween(60)) }
-                            tryAwaitRelease()
+                            val opening = PedalStage.levelForHold(0L, stageMs, firstLevel)
+                            deck.setInput { it.axes[axis] = PedalStage.axis(opening) }
+                            coroutineScope.launch { animatedValue.animateTo(opening, androidx.compose.animation.core.tween(60)) }
+
+                            // withTimeoutOrNull returns null only if the finger is still down when the
+                            // stage boundary passes — the "held it deliberately" case, so go to the
+                            // floor and then wait for the real release. A one-stage pedal (stageMs = 0)
+                            // already opened at full and just waits.
+                            if (stageMs > 0L) {
+                                if (withTimeoutOrNull(stageMs) { tryAwaitRelease() } == null) {
+                                    tick()
+                                    deck.setInput { it.axes[axis] = PedalStage.axis(1f) }
+                                    coroutineScope.launch { animatedValue.animateTo(1f, androidx.compose.animation.core.tween(140)) }
+                                    tryAwaitRelease()
+                                }
+                            } else {
+                                tryAwaitRelease()
+                            }
+
                             deck.setInput { it.axes[axis] = 0 }
                             down = false
                             coroutineScope.launch { animatedValue.animateTo(0f, androidx.compose.animation.core.tween(100)) }
@@ -941,19 +1058,40 @@ private fun OptionsSheet(
 
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("STEERING MODE", color = PitWall.TowerGray, fontSize = 10.sp, letterSpacing = 1.sp)
+                // gyroFailed means the phone has neither a gravity nor an accelerometer sensor, so the
+                // caller refuses the switch. Say that on the chip instead of looking like a dead button.
+                val gyroBlocked = gyroFailed && mode != "gyro"
                 ChipLabel(
-                    if (mode == "gyro") "MODE: GYROSCOPE" else "MODE: TOUCH WHEEL",
-                    if (mode == "gyro") PitWall.SignalGreen else PitWall.Indigo,
+                    when {
+                        gyroBlocked -> "MODE: TOUCH WHEEL (NO TILT SENSOR)"
+                        mode == "gyro" -> "MODE: GYROSCOPE"
+                        else -> "MODE: TOUCH WHEEL"
+                    },
+                    when {
+                        gyroBlocked -> PitWall.TowerGray
+                        mode == "gyro" -> PitWall.SignalGreen
+                        else -> PitWall.Indigo
+                    },
                     onToggleMode,
                 )
             }
 
             if (mode == "gyro") {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("GYRO RANGE", color = PitWall.TowerGray, fontSize = 10.sp, letterSpacing = 1.sp)
-                    ChipLabel("$gyroRangeDeg° (SENSITIVITY)", PitWall.WheelGlow, onCycleGyroRange)
-                    ChipLabel("RECENTER GYRO", PitWall.Amber, onCenter)
+                    Text("TILT RANGE", color = PitWall.TowerGray, fontSize = 10.sp, letterSpacing = 1.sp)
+                    ChipLabel("$gyroRangeDeg° (LOCK TO LOCK)", PitWall.WheelGlow, onCycleGyroRange)
+                    ChipLabel("SET CENTRE", PitWall.Amber, onCenter)
                 }
+                // Tilt steering now reads gravity, not yaw: the gesture is a physical wheel rotation,
+                // not a flat turn of the phone. Spell that out — held flat there is no rotation to
+                // measure and steering deliberately parks at centre.
+                Text(
+                    "Hold the phone upright in landscape and rotate it like a wheel. " +
+                        "SET CENTRE makes your current grip the straight-ahead position.",
+                    color = PitWall.TowerGray,
+                    fontSize = 9.sp,
+                    lineHeight = 12.sp,
+                )
             } else {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("WHEEL RANGE", color = PitWall.TowerGray, fontSize = 10.sp, letterSpacing = 1.sp)

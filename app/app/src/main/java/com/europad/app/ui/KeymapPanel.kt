@@ -17,25 +17,36 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.europad.app.net.FrameEncoder
 import com.europad.app.net.UdpTransport
 
+/** Range of the RETURN TO CENTRE slider, in ms. */
+private const val RETURN_MS_MIN = 60f
+private const val RETURN_MS_MAX = 900f
+
 /**
  * On-phone remapping: every action shows its current key; tapping it opens the picker. A change
  * updates local storage immediately AND sends a config frame so the PC server rewrites the active
  * profile JSON — remapping lives entirely on the phone, no PC edits needed.
+ *
+ * @param pendingKeys actions saved on the phone but not yet pushed over a live link (shown amber)
+ * @param sentKeys actions confirmed pushed to the server (shown green)
  */
 @Composable
 fun KeymapPanel(
@@ -45,9 +56,13 @@ fun KeymapPanel(
     mode: String = "wheel",
     wheelRangeDeg: Int = 360,
     gyroRangeDeg: Int = 180,
+    returnMs: Int = 250,
+    pendingKeys: Set<String> = emptySet(),
+    sentKeys: Set<String> = emptySet(),
     onToggleMode: () -> Unit = {},
     onCycleWheelRange: () -> Unit = {},
     onCycleGyroRange: () -> Unit = {},
+    onReturnMs: (Int) -> Unit = {},
     onRemap: (String, String) -> Unit,
     onClose: () -> Unit,
     onDisconnect: () -> Unit = {},
@@ -80,7 +95,7 @@ fun KeymapPanel(
             ) { onToggleMode() }
 
             if (mode == "gyro") {
-                ChipLabel("GYRO: $gyroRangeDeg°", PitWall.WheelGlow) { onCycleGyroRange() }
+                ChipLabel("TILT: $gyroRangeDeg°", PitWall.WheelGlow) { onCycleGyroRange() }
             } else {
                 ChipLabel("WHEEL: $wheelRangeDeg°", PitWall.WheelGlow) { onCycleWheelRange() }
             }
@@ -107,13 +122,48 @@ fun KeymapPanel(
                 onCancel = { picking = null },
             )
         } else {
-            KeyList(keymap, onOpen = { picking = it })
+            if (mode != "gyro") ReturnToCenterRow(returnMs, onReturnMs)
+            KeyList(keymap, pendingKeys, sentKeys, onOpen = { picking = it })
         }
     }
 }
 
+/** How fast the wheel snaps back to centre once the finger lifts. */
 @Composable
-private fun KeyList(keymap: Map<String, String>, onOpen: (String) -> Unit) {
+private fun ReturnToCenterRow(returnMs: Int, onReturnMs: (Int) -> Unit) {
+    // Local float so dragging stays smooth; the pref is written on release.
+    var ms by remember(returnMs) { mutableFloatStateOf(returnMs.toFloat()) }
+    Column(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("RETURN TO CENTRE", color = PitWall.TowerGray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Text("${ms.toInt()} ms", color = PitWall.WheelGlow, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+        }
+        Slider(
+            value = ms,
+            valueRange = RETURN_MS_MIN..RETURN_MS_MAX,
+            onValueChange = { ms = it },
+            onValueChangeFinished = { onReturnMs(ms.toInt()) },
+            colors = SliderDefaults.colors(
+                thumbColor = PitWall.WheelGlow,
+                activeTrackColor = PitWall.WheelGlow,
+                inactiveTrackColor = Color(0xFF232330),
+            ),
+            modifier = Modifier.height(24.dp),
+        )
+    }
+}
+
+@Composable
+private fun KeyList(
+    keymap: Map<String, String>,
+    pendingKeys: Set<String>,
+    sentKeys: Set<String>,
+    onOpen: (String) -> Unit,
+) {
     Column(
         Modifier
             .fillMaxSize()
@@ -122,6 +172,12 @@ private fun KeyList(keymap: Map<String, String>, onOpen: (String) -> Unit) {
     ) {
         for (name in TruckKeys.names) {
             val label = TruckKeys.labels[name] ?: name
+            // Amber = the phone saved it but no live link has carried it yet; green = the PC has it.
+            val keyColor = when (name) {
+                in pendingKeys -> PitWall.Amber
+                in sentKeys -> PitWall.SignalGreen
+                else -> PitWall.Indigo
+            }
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -136,10 +192,10 @@ private fun KeyList(keymap: Map<String, String>, onOpen: (String) -> Unit) {
                 Box(
                     Modifier
                         .background(PitWall.Ground, RoundedCornerShape(4.dp))
-                        .border(1.dp, PitWall.Indigo.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
+                        .border(1.dp, keyColor.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
                         .padding(horizontal = 10.dp, vertical = 4.dp),
                 ) {
-                    Text(keymap[name] ?: "—", color = PitWall.Indigo, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    Text(keymap[name] ?: "—", color = keyColor, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }

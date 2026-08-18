@@ -16,8 +16,12 @@ enum class ConnState { Idle, Connecting, Connected, Rejected, Reconnecting }
  *
  * The reader owns every receive so ACK / PING_REPLY / RUMBLE can arrive in any order — the old
  * blocking `receive()` inside the ping call swallowed rumble frames. Housekeeping doubles as the
- * keepalive (the server's 300 ms failsafe fires without traffic), the RTT sampler and the
- * reconnect watchdog.
+ * keepalive (the server's failsafe fires without traffic), the RTT sampler and the reconnect
+ * watchdog.
+ *
+ * The keepalive ping is *only* a keepalive: the server treats any frame carrying a control flag as
+ * payload-free and never applies it to the pad. It used to, and a zeroed ping every 150 ms centred
+ * the wheel and released every held key mid-drive.
  */
 class UdpTransport(
     /** Resolves whether a given local socket address sits on the USB-tether interface. */
@@ -109,7 +113,7 @@ class UdpTransport(
     /**
      * Fire-and-forget control frame (key remaps) with best-effort delivery: one-shot UDP is lost
      * for good if the Wi-Fi radio is mid power-save burst (the same stall that trips the server's
-     * 300 ms failsafe). Retry over ~1.6 s — idempotent on the server side (same bit+key rewrite),
+     * failsafe). Retry over ~1.6 s — idempotent on the server side (same bit+key rewrite),
      * and by the later attempts the phone has re-helloed any freed slot.
      */
     fun sendConfig(buf: ByteArray) {
@@ -216,7 +220,7 @@ class UdpTransport(
                         sendHello()
                     } else if (now - lastPingAt.get() >= TICK_MS) {
                         // Doubles as keepalive: the server refreshes the slot on any frame, so
-                        // pinging faster than the 300 ms failsafe keeps an idle deck alive.
+                        // pinging well inside the failsafe window keeps an idle deck alive.
                         sendPing()
                     }
                 }

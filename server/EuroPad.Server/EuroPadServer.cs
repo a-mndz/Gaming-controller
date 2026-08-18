@@ -208,14 +208,29 @@ public sealed class EuroPadServer : IAsyncDisposable
             return;
         }
 
-        ApplyInput(slot, frame, now);
-
-        if ((frame.Flags & Proto.FlagPingRequest) != 0)
+        // A ping is a control frame: the phone builds it from a zeroed buffer, so its axes and
+        // buttons are all 0 and carry no input. Feeding it to ApplyInput centred the wheel, dropped
+        // both pedals and released every held key ~7x a second (the keeper pings every 150 ms) —
+        // in game that read as steering stutter, a wheel that never held full lock, gear pulses
+        // split into extra press/release edges, and the handbrake toggling itself. Refresh the
+        // keepalive clock (that is what the ping is *for*) and reply; never touch the pad.
+        if (frame.IsPingRequest)
         {
+            slot.LastPacketTicks = now;
             var reply = new byte[Proto.FrameSize];
             FrameCodec.EncodePingReply(reply, frame.TimestampMs);
             TrySend(socket, reply, remote);
+            return;
         }
+
+        // Any other control frame (reply/ack/reject/rumble echo) is keepalive-only for the same reason.
+        if (!frame.CarriesInput)
+        {
+            slot.LastPacketTicks = now;
+            return;
+        }
+
+        ApplyInput(slot, frame, now);
     }
 
     /// <summary>
@@ -295,6 +310,14 @@ public sealed class EuroPadServer : IAsyncDisposable
 
     private void ApplyInput(SlotState slot, in InputFrame frame, long now)
     {
+        // Belt and braces: a control frame carries no payload, so applying one would neutralize the
+        // pad. HandlePacket already filters them; this stops a future caller reintroducing the bug.
+        if (!frame.CarriesInput)
+        {
+            slot.LastPacketTicks = now;
+            return;
+        }
+
         if (slot.HasSeq && SeqCompare.IsStaleOrEqual(frame.Seq, slot.LastSeq)) return;
         slot.LastSeq = frame.Seq;
         slot.HasSeq = true;

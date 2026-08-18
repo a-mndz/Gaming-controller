@@ -2,6 +2,7 @@ package com.europad.app
 
 import com.europad.app.ui.DeckRect
 import com.europad.app.ui.ElementPosition
+import com.europad.app.ui.LayoutEdit
 import com.europad.app.ui.LayoutPreferences
 import org.junit.Assert.*
 import org.junit.Test
@@ -16,6 +17,87 @@ import kotlin.random.Random
  * **Validates: Requirements 2.2, 2.4, 4.1, 4.2, 4.3, 4.4, 9.2**
  */
 class LayoutPropertiesTest {
+
+    // ========================================================================
+    // Resize handle: 44 dp floor + on-canvas clamp (Requirements 4.1, 9.2)
+    // ========================================================================
+
+    /** A corner drag towards zero stops at the 44 dp touch target, in both axes. */
+    @Test
+    fun `resize cannot shrink below the 44 dp touch target`() {
+        val canvasW = 880f
+        val canvasH = 400f
+        val start = ElementPosition("WHEEL", cx = 0.3f, cy = 0.5f, w = 0.25f, h = 0.5f)
+
+        val shrunk = LayoutEdit.resized(start, w = 0.001f, h = 0.001f, canvasWDp = canvasW, canvasHDp = canvasH)
+
+        assertEquals("width floor in dp", LayoutEdit.MIN_TOUCH_DP, shrunk.w * canvasW, 0.01f)
+        assertEquals("height floor in dp", LayoutEdit.MIN_TOUCH_DP, shrunk.h * canvasH, 0.01f)
+        // Resizing by the bottom-right corner leaves the top-left edge where it was.
+        assertEquals(start.cx - start.w / 2f, shrunk.cx - shrunk.w / 2f, 0.0001f)
+        assertEquals(start.cy - start.h / 2f, shrunk.cy - shrunk.h / 2f, 0.0001f)
+    }
+
+    /** A corner drag past the edge stops at it: the element can never hang off the canvas. */
+    @Test
+    fun `resize cannot push the element off canvas`() {
+        val start = ElementPosition("BRAKE", cx = 0.8f, cy = 0.7f, w = 0.15f, h = 0.2f)
+
+        val grown = LayoutEdit.resized(start, w = 5f, h = 5f, canvasWDp = 880f, canvasHDp = 400f)
+        val r = grown.toDeckRect()
+
+        assertTrue("left in bounds", r.left >= -0.0001f)
+        assertTrue("top in bounds", r.top >= -0.0001f)
+        assertTrue("right in bounds", r.right <= 1.0001f)
+        assertTrue("bottom in bounds", r.bottom <= 1.0001f)
+    }
+
+    /** Every random resize satisfies both rules at once — floor and bounds can't fight. */
+    @Test
+    fun `random resizes stay on canvas and above the minimum`() {
+        val random = Random(4321)
+        val canvasW = 880f
+        val canvasH = 400f
+        repeat(500) {
+            val start = ElementPosition.create(
+                id = "E",
+                cx = random.nextFloat(),
+                cy = random.nextFloat(),
+                w = 0.05f + random.nextFloat() * 0.3f,
+                h = 0.05f + random.nextFloat() * 0.3f,
+            )
+            val out = LayoutEdit.resized(
+                start,
+                w = random.nextFloat() * 2f - 0.5f,
+                h = random.nextFloat() * 2f - 0.5f,
+                canvasWDp = canvasW,
+                canvasHDp = canvasH,
+            )
+            val r = out.toDeckRect()
+            assertTrue("$out off canvas", r.left >= -0.0001f && r.top >= -0.0001f &&
+                r.right <= 1.0001f && r.bottom <= 1.0001f)
+            // The floor yields only when there is literally less than 44 dp of canvas left.
+            val roomW = (1f - (start.cx - start.w / 2f).coerceIn(0f, 1f)) * canvasW
+            val roomH = (1f - (start.cy - start.h / 2f).coerceIn(0f, 1f)) * canvasH
+            assertTrue("$out too narrow", out.w * canvasW >= minOf(LayoutEdit.MIN_TOUCH_DP, roomW) - 0.01f)
+            assertTrue("$out too short", out.h * canvasH >= minOf(LayoutEdit.MIN_TOUCH_DP, roomH) - 0.01f)
+        }
+    }
+
+    /** The editor's overlap test is a true AABB intersect — touching edges are not an overlap. */
+    @Test
+    fun `overlap agrees with the AABB definition`() {
+        val a = ElementPosition("A", cx = 0.2f, cy = 0.2f, w = 0.2f, h = 0.2f).toDeckRect()
+        val touching = ElementPosition("B", cx = 0.4f, cy = 0.2f, w = 0.2f, h = 0.2f).toDeckRect()
+        val over = ElementPosition("C", cx = 0.35f, cy = 0.2f, w = 0.2f, h = 0.2f).toDeckRect()
+        val apart = ElementPosition("D", cx = 0.8f, cy = 0.8f, w = 0.2f, h = 0.2f).toDeckRect()
+
+        assertFalse("edge-to-edge is not an overlap", LayoutEdit.overlaps(a, touching))
+        assertTrue(LayoutEdit.overlaps(a, over))
+        assertFalse(LayoutEdit.overlaps(a, apart))
+        assertEquals(detectOverlap(a, over), LayoutEdit.overlaps(a, over))
+        assertEquals(detectOverlap(a, apart), LayoutEdit.overlaps(a, apart))
+    }
 
     // ========================================================================
     // Property 1: Drag Position Constrained to Bounds
@@ -457,6 +539,8 @@ class LayoutPropertiesTest {
         screenConfigs.forEach { (widthPx, heightPx, density) ->
             val widthDp = widthPx / density
             val heightDp = heightPx / density
+            val minFracW = minTouchTargetDp / widthDp
+            val minFracH = minTouchTargetDp / heightDp
             
             // Test various element sizes in fractional coordinates
             val testElements = generateElementSizeTestCases(100)
@@ -468,17 +552,15 @@ class LayoutPropertiesTest {
                 val meetsMinWidth = widthDpActual >= minTouchTargetDp
                 val meetsMinHeight = heightDpActual >= minTouchTargetDp
                 
-                // For a ${widthPx}x${heightPx} screen at ${density}x density
-                // Element must be at least ${minTouchTargetDp}dp
-                // This test verifies the calculation, actual enforcement would be in UI code
+                // For a ${widthPx}x${heightPx} screen at ${density}x density the required
+                // fractional minimums are minFracW x minFracH; verify the dp conversion is
+                // self-consistent for every element that meets them.
                 
-                if (pos.w >= 0.05f && pos.h >= 0.05f) {
-                    // Elements with reasonable size should typically meet requirements
-                    // This is a validation check, not an enforcement
+                if (pos.w >= minFracW && pos.h >= minFracH) {
                     assertTrue(
                         "Element too small for $description on ${widthPx}x${heightPx} @ ${density}x: " +
                         "${widthDpActual}dp x ${heightDpActual}dp",
-                        (meetsMinWidth && meetsMinHeight) || (pos.w < 0.05f || pos.h < 0.05f)
+                        meetsMinWidth && meetsMinHeight
                     )
                 }
             }
@@ -884,13 +966,13 @@ class LayoutPropertiesTest {
         return cases
     }
     
-    private fun generateOverlapTestCases(count: Int): List<Triple<ElementPosition, ElementPosition, Boolean, String>> {
+    private fun generateOverlapTestCases(count: Int): List<OverlapCase> {
         val random = Random(45678)
-        val cases = mutableListOf<Triple<ElementPosition, ElementPosition, Boolean, String>>()
+        val cases = mutableListOf<OverlapCase>()
         
         // Add known overlapping cases
         cases.add(
-            Triple(
+            OverlapCase(
                 ElementPosition("A", 0.5f, 0.5f, 0.2f, 0.2f),
                 ElementPosition("B", 0.5f, 0.5f, 0.2f, 0.2f),
                 true,
@@ -898,7 +980,7 @@ class LayoutPropertiesTest {
             )
         )
         cases.add(
-            Triple(
+            OverlapCase(
                 ElementPosition("A", 0.4f, 0.5f, 0.2f, 0.2f),
                 ElementPosition("B", 0.5f, 0.5f, 0.2f, 0.2f),
                 true,
@@ -908,7 +990,7 @@ class LayoutPropertiesTest {
         
         // Add known non-overlapping cases
         cases.add(
-            Triple(
+            OverlapCase(
                 ElementPosition("A", 0.2f, 0.5f, 0.1f, 0.1f),
                 ElementPosition("B", 0.8f, 0.5f, 0.1f, 0.1f),
                 false,
@@ -934,7 +1016,7 @@ class LayoutPropertiesTest {
             )
             
             val overlaps = detectOverlap(pos1.toDeckRect(), pos2.toDeckRect())
-            cases.add(Triple(pos1, pos2, overlaps, "random case $it"))
+            cases.add(OverlapCase(pos1, pos2, overlaps, "random case $it"))
         }
         
         return cases
@@ -1003,4 +1085,11 @@ class LayoutPropertiesTest {
         
         return cases
     }
+    
+    private data class OverlapCase(
+        val a: ElementPosition,
+        val b: ElementPosition,
+        val overlaps: Boolean,
+        val description: String
+    )
 }

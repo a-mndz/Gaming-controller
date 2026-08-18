@@ -29,7 +29,7 @@ public class ProfileTests
         }
         finally
         {
-            Directory.Delete(dir, true);
+            DeleteDir(dir);
         }
     }
 
@@ -71,7 +71,7 @@ public class ProfileTests
         }
         finally
         {
-            Directory.Delete(dir, true);
+            DeleteDir(dir);
         }
     }
 
@@ -93,7 +93,7 @@ public class ProfileTests
         }
         finally
         {
-            Directory.Delete(dir, true);
+            DeleteDir(dir);
         }
     }
 
@@ -122,7 +122,7 @@ public class ProfileTests
         }
         finally
         {
-            Directory.Delete(dir, true);
+            DeleteDir(dir);
         }
     }
 
@@ -156,7 +156,27 @@ public class ProfileTests
         }
         finally
         {
-            Directory.Delete(dir, true);
+            DeleteDir(dir);
+        }
+    }
+
+    /// <summary>
+    /// Windows can still be holding a handle on a just-closed file (indexer, antivirus, or a
+    /// FileSystemWatcher callback that was dispatched moments before Dispose). A bare
+    /// Directory.Delete then throws IOException and fails an otherwise green test, so retry briefly
+    /// and never let cleanup be the thing that reports a failure.
+    /// </summary>
+    private static void DeleteDir(string dir)
+    {
+        for (int attempt = 0; attempt < 10; attempt++)
+        {
+            try
+            {
+                if (Directory.Exists(dir)) Directory.Delete(dir, true);
+                return;
+            }
+            catch (IOException) { Thread.Sleep(50); }
+            catch (UnauthorizedAccessException) { Thread.Sleep(50); }
         }
     }
 }

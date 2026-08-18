@@ -69,6 +69,46 @@ data class ElementPosition(
 }
 
 /**
+ * Pure drag/resize/overlap math for the layout editor. Fractions of the *inner* canvas (the deck
+ * area inside its 3% margin), so the editor and [DeckLayout.place]-style rendering agree exactly.
+ * No Compose types so it unit-tests on the JVM.
+ */
+object LayoutEdit {
+    /** Accessibility floor for an interactive element (Requirement 9.2). */
+    const val MIN_TOUCH_DP = 44f
+
+    /** Moves an element to [cx]/[cy], clamped so it stays fully inside the canvas. */
+    fun moved(p: ElementPosition, cx: Float, cy: Float): ElementPosition = ElementPosition.create(
+        id = p.id,
+        cx = cx.coerceIn(p.w / 2f, 1f - p.w / 2f),
+        cy = cy.coerceIn(p.h / 2f, 1f - p.h / 2f),
+        w = p.w,
+        h = p.h,
+    )
+
+    /**
+     * Resizes an element by its bottom-right corner: the top-left edge stays put, so [w]/[h] are
+     * clamped to at least [MIN_TOUCH_DP] and at most the room left on the canvas.
+     *
+     * @param canvasWDp inner canvas width in dp, @param canvasHDp inner canvas height in dp
+     */
+    fun resized(p: ElementPosition, w: Float, h: Float, canvasWDp: Float, canvasHDp: Float): ElementPosition {
+        val left = (p.cx - p.w / 2f).coerceIn(0f, 1f)
+        val top = (p.cy - p.h / 2f).coerceIn(0f, 1f)
+        // A canvas smaller than the touch target would give minW > 1: cap so the range stays valid.
+        val minW = if (canvasWDp > 0f) (MIN_TOUCH_DP / canvasWDp).coerceAtMost(1f - left) else 0f
+        val minH = if (canvasHDp > 0f) (MIN_TOUCH_DP / canvasHDp).coerceAtMost(1f - top) else 0f
+        val newW = w.coerceIn(minW, 1f - left)
+        val newH = h.coerceIn(minH, 1f - top)
+        return ElementPosition.create(p.id, left + newW / 2f, top + newH / 2f, newW, newH)
+    }
+
+    /** True AABB intersection — matches the spec's overlap definition, no centre-distance fudge. */
+    fun overlaps(a: DeckRect, b: DeckRect): Boolean =
+        !(a.right <= b.left || a.left >= b.right || a.bottom <= b.top || a.top >= b.bottom)
+}
+
+/**
  * Identifies all supported control elements that can be repositioned.
  */
 enum class ElementId(val displayName: String) {

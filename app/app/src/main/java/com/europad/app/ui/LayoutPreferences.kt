@@ -20,6 +20,7 @@ object LayoutPreferences {
         ignoreUnknownKeys = true
         isLenient = true
         coerceInputValues = true
+        encodeDefaults = true
     }
 
     /**

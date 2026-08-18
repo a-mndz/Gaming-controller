@@ -17,10 +17,18 @@
         android:theme="@android:style/Theme.Material.NoActionBar"
         android:usesCleartextTraffic="true">
 
+        <!--
+            configChanges: without these, any config change (rotation while unlocked, multi-window,
+            font/display-size change, dark-mode toggle, keyboard dock) destroys and recreates the
+            activity. That tears down the UDP transport and the whole deck mid-drive, dropping the
+            slot and re-pairing. Handling them in-process keeps the live session intact; the layout is
+            orientation-locked anyway so there is nothing to re-lay-out.
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:screenOrientation="landscape">
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density|fontScale|locale|layoutDirection">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

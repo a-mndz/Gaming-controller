@@ -1,11 +1,19 @@
 package com.europad.app.net
 
 import com.europad.app.input.InputFrame
+import java.util.concurrent.atomic.AtomicInteger
 
 object FrameEncoder {
-    private var seq: Int = 0
+    /**
+     * Wire sequence counter, shared by three threads: the 120 Hz sender, the keeper (pings) and the
+     * config retry thread. A plain `var` read-modify-write let two of them hand out the same number,
+     * and the server drops any snapshot whose seq is not strictly newer than the last one it applied
+     * — so a torn increment silently threw away real input. Atomic increment costs nothing here.
+     */
+    private val seq = AtomicInteger(0)
 
-    fun encodeFrame(frame: InputFrame, flags: Byte = 0): Pair<ByteArray, Int> {
+    /** Header only: magic, version, flags and a fresh sequence number. Payload is the caller's job. */
+    private fun encodeHeader(flags: Byte = 0): Pair<ByteArray, Int> {
         val b = ByteArray(Proto.FRAME_SIZE)
         b[Proto.OFF_MAGIC] = Proto.MAGIC_LO
         b[Proto.OFF_MAGIC + 1] = Proto.MAGIC_HI
@@ -18,7 +26,7 @@ object FrameEncoder {
     }
 
     fun encodeSnapshot(frame: InputFrame, tsMs: Long): Pair<ByteArray, Int> {
-        val (b, s) = encodeFrame(frame, 0)
+        val (b, s) = encodeHeader(0)
         putU32(b, Proto.OFF_TIMESTAMP, tsMs)
         putU16(b, Proto.OFF_BUTTONS_LO, frame.buttonsLo)
         putU16(b, Proto.OFF_BUTTONS_HI, frame.buttonsHi)
@@ -87,10 +95,7 @@ object FrameEncoder {
 
     fun parseFlags(buf: ByteArray): Byte = buf[Proto.OFF_FLAGS]
 
-    private fun nextSeq(): Int {
-        seq = (seq + 1) and 0xFFFF
-        return seq
-    }
+    private fun nextSeq(): Int = seq.incrementAndGet() and 0xFFFF
 
     private fun putU16(b: ByteArray, off: Int, v: Int) {
         b[off] = (v and 0xFF).toByte()

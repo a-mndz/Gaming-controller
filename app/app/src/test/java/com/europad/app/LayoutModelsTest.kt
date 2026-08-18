@@ -65,92 +65,52 @@ class LayoutModelsTest {
         assertEquals(1.0f, position.h, 0.0001f)
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun `ElementPosition rejects cx below range`() {
-        ElementPosition(
-            id = "TEST",
-            cx = -0.1f,
-            cy = 0.5f,
-            w = 0.1f,
-            h = 0.1f
-        )
+    @Test
+    fun `ElementPosition clamps cx below range via create`() {
+        val position = ElementPosition.create("TEST", -0.1f, 0.5f, 0.1f, 0.1f)
+        assertEquals(0.0f, position.cx, 0.0001f)
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun `ElementPosition rejects cx above range`() {
-        ElementPosition(
-            id = "TEST",
-            cx = 1.1f,
-            cy = 0.5f,
-            w = 0.1f,
-            h = 0.1f
-        )
+    @Test
+    fun `ElementPosition clamps cx above range via create`() {
+        val position = ElementPosition.create("TEST", 1.1f, 0.5f, 0.1f, 0.1f)
+        assertEquals(1.0f, position.cx, 0.0001f)
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun `ElementPosition rejects cy below range`() {
-        ElementPosition(
-            id = "TEST",
-            cx = 0.5f,
-            cy = -0.1f,
-            w = 0.1f,
-            h = 0.1f
-        )
+    @Test
+    fun `ElementPosition clamps cy below range via create`() {
+        val position = ElementPosition.create("TEST", 0.5f, -0.1f, 0.1f, 0.1f)
+        assertEquals(0.0f, position.cy, 0.0001f)
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun `ElementPosition rejects cy above range`() {
-        ElementPosition(
-            id = "TEST",
-            cx = 0.5f,
-            cy = 1.1f,
-            w = 0.1f,
-            h = 0.1f
-        )
+    @Test
+    fun `ElementPosition clamps cy above range via create`() {
+        val position = ElementPosition.create("TEST", 0.5f, 1.1f, 0.1f, 0.1f)
+        assertEquals(1.0f, position.cy, 0.0001f)
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun `ElementPosition rejects w below range`() {
-        ElementPosition(
-            id = "TEST",
-            cx = 0.5f,
-            cy = 0.5f,
-            w = -0.1f,
-            h = 0.1f
-        )
+    @Test
+    fun `ElementPosition clamps w below range via create`() {
+        val position = ElementPosition.create("TEST", 0.5f, 0.5f, -0.1f, 0.1f)
+        assertEquals(0.0f, position.w, 0.0001f)
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun `ElementPosition rejects w above range`() {
-        ElementPosition(
-            id = "TEST",
-            cx = 0.5f,
-            cy = 0.5f,
-            w = 1.1f,
-            h = 0.1f
-        )
+    @Test
+    fun `ElementPosition clamps w above range via create`() {
+        val position = ElementPosition.create("TEST", 0.5f, 0.5f, 1.1f, 0.1f)
+        assertEquals(1.0f, position.w, 0.0001f)
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun `ElementPosition rejects h below range`() {
-        ElementPosition(
-            id = "TEST",
-            cx = 0.5f,
-            cy = 0.5f,
-            w = 0.1f,
-            h = -0.1f
-        )
+    @Test
+    fun `ElementPosition clamps h below range via create`() {
+        val position = ElementPosition.create("TEST", 0.5f, 0.5f, 0.1f, -0.1f)
+        assertEquals(0.0f, position.h, 0.0001f)
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun `ElementPosition rejects h above range`() {
-        ElementPosition(
-            id = "TEST",
-            cx = 0.5f,
-            cy = 0.5f,
-            w = 0.1f,
-            h = 1.1f
-        )
+    @Test
+    fun `ElementPosition clamps h above range via create`() {
+        val position = ElementPosition.create("TEST", 0.5f, 0.5f, 0.1f, 1.1f)
+        assertEquals(1.0f, position.h, 0.0001f)
     }
 
     @Test
@@ -309,7 +269,7 @@ class LayoutModelsTest {
             timestamp = 1699876543210L
         )
 
-        val json = Json.encodeToString(preset)
+        val json = Json { encodeDefaults = true }.encodeToString(preset)
 
         assertTrue(json.contains("\"version\":1"))
         assertTrue(json.contains("\"mode\":\"wheel\""))

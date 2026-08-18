@@ -57,6 +57,7 @@ import com.europad.app.R
 import com.europad.app.input.HapticEngine
 import com.europad.app.net.ConnState
 import com.europad.app.net.EuroPadDiscovery
+import com.europad.app.net.Proto
 import com.europad.app.net.UdpTransport
 import com.europad.app.net.isTetherAddress
 import kotlinx.coroutines.Dispatchers
@@ -289,7 +290,7 @@ fun DeckPickerScreen() {
                         }
                         SteeringChoiceCard(
                             label = "GYROSCOPE",
-                            detail = if (truckMode == "gyro") "Sensitivity: $gyroRange°" else "Tilt Phone + Dual Pedals",
+                            detail = if (truckMode == "gyro") "Lock to lock: $gyroRange°" else "Rotate Phone Like a Wheel",
                             selected = truckMode == "gyro",
                             modifier = Modifier.weight(1f),
                         ) {
@@ -460,7 +461,7 @@ fun DeckPickerScreen() {
                             )
                         }
                         Button(
-                            onClick = { connectTo(manualIp.trim(), 4242) },
+                            onClick = { connectTo(manualIp.trim(), Proto.DEFAULT_PORT) },
                             modifier = Modifier.height(38.dp),
                             shape = RoundedCornerShape(8.dp),
                             colors = ButtonDefaults.buttonColors(containerColor = PitWall.Indigo),

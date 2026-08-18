@@ -22,6 +22,7 @@ public sealed class ProfileManager : IDisposable
     private readonly Dictionary<string, AxisRouting> _routing = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _fileByName = new(StringComparer.OrdinalIgnoreCase);
     private string _activeName = DefaultName;
+    private volatile bool _disposed;
 
     public const string DefaultName = "default";
 
@@ -48,7 +49,21 @@ public sealed class ProfileManager : IDisposable
         _watcher.Deleted += (_, _) => LoadAll();
     }
 
-    public void Dispose() => _watcher.Dispose();
+    /// <summary>
+    /// Stops watching and, crucially, waits for a reload that is already running on a
+    /// FileSystemWatcher threadpool callback. Disposing the watcher alone does not cancel a callback
+    /// that has already been dispatched, so without the drain below a reload could still hold a
+    /// profile file open after Dispose returned — which broke a caller that deleted the profiles
+    /// directory next (the hot-reload unit test, intermittently).
+    /// </summary>
+    public void Dispose()
+    {
+        // Set first: any callback that reaches the gate after this point bails out (see LoadAll).
+        _disposed = true;
+        _watcher.EnableRaisingEvents = false;
+        _watcher.Dispose();
+        lock (_gate) { }   // drains a reload already inside the lock
+    }
 
     public ProfileData Active
     {
@@ -154,14 +169,17 @@ public sealed class ProfileManager : IDisposable
         // was deleted between the event and the read) would kill the process, so swallow at the top.
         try
         {
-            if (!Directory.Exists(_dir)) return;
+            if (_disposed || !Directory.Exists(_dir)) return;
             lock (_gate)
             {
+                // Re-check under the gate: Dispose sets the flag and then waits on this same lock,
+                // so a callback that got here late must not open any file.
+                if (_disposed) return;
                 foreach (var file in Directory.GetFiles(_dir, "*.json"))
                 {
                     try
                     {
-                        var data = JsonSerializer.Deserialize<ProfileData>(File.ReadAllText(file, Encoding.UTF8), JsonOpts);
+                        var data = JsonSerializer.Deserialize<ProfileData>(ReadShared(file), JsonOpts);
                         if (data?.Name is not null)
                         {
                             _byName[data.Name] = data;
@@ -175,6 +193,20 @@ public sealed class ProfileManager : IDisposable
             }
         }
         catch { }
+    }
+
+    /// <summary>
+    /// Reads a profile without locking other processes out. File.ReadAllText opens with
+    /// FileShare.Read, so a reload landing on the same millisecond as an editor's save (or a
+    /// directory delete) makes the *other* side fail. Profiles are a few hundred bytes; sharing
+    /// write+delete access costs nothing and a torn read just fails to deserialize and is ignored.
+    /// </summary>
+    private static string ReadShared(string path)
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
+                                      FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(fs, Encoding.UTF8);
+        return reader.ReadToEnd();
     }
 
     private void LoadBuiltInDefault()

@@ -2,343 +2,268 @@ package com.europad.app.ui
 
 import android.content.SharedPreferences
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlin.math.roundToInt
 
 /**
- * Full-screen overlay for editing control element positions.
- * Displays all elements as draggable items with visual feedback.
+ * Edit-mode chrome, drawn as a transparent overlay *on top of the live deck*.
  *
- * @param prefs SharedPreferences instance for tracking first-time instructions
- * @param mode Current steering mode ("wheel" or "gyro")
- * @param defaultPositions Default positions from DeckLayout
- * @param customPositions Current custom positions (if any)
- * @param onSave Callback when user saves changes
- * @param onReset Callback when user resets to default
- * @param onCancel Callback when user cancels editing
+ * It deliberately owns no geometry of its own: [pad]/[innerW]/[innerH] are the exact Dp values the
+ * deck lays its controls out with, so a handle is always the same rectangle as the control under it
+ * and a saved position lands where the editor showed it. Because the overlay sits above the deck it
+ * also swallows every pointer event, so the real controls never fire while editing — no per-control
+ * edit flag needed.
+ *
+ * @param positions in-progress edit map (fractions of the inner canvas)
+ * @param onChange called with the new position of one element, live during a drag
  */
 @Composable
-fun LayoutEditPanel(
+fun LayoutEditOverlay(
     prefs: SharedPreferences,
     mode: String,
-    defaultPositions: Map<String, DeckRect>,
-    customPositions: Map<String, ElementPosition>,
-    onSave: (Map<String, ElementPosition>) -> Unit,
+    positions: Map<String, ElementPosition>,
+    pad: Dp,
+    innerW: Dp,
+    innerH: Dp,
+    hasChanges: Boolean,
+    onChange: (String, ElementPosition) -> Unit,
+    onSave: () -> Unit,
     onReset: () -> Unit,
     onCancel: () -> Unit,
 ) {
-    // Current editing state
-    var editingPositions by remember {
-        mutableStateOf(
-            customPositions.ifEmpty {
-                defaultPositions.mapValues { (id, rect) ->
-                    ElementPosition.fromDeckRect(id, rect)
-                }
-            }
-        )
-    }
-
-    // Track which element is currently selected
-    var selectedElement by remember { mutableStateOf<String?>(null) }
-
-    // Track if changes have been made
-    var hasChanges by remember { mutableStateOf(false) }
-
-    // Dialog state
+    var selected by remember { mutableStateOf<String?>(null) }
     var showUnsavedDialog by remember { mutableStateOf(false) }
+    var showInstructions by remember { mutableStateOf(!LayoutPreferences.hasSeenEditModeInstructions(prefs)) }
 
-    // First-time instructions state
-    val isFirstTime = remember { !LayoutPreferences.hasSeenEditModeInstructions(prefs) }
-    var showFirstTimeInstructions by remember { mutableStateOf(isFirstTime) }
-
-    // Minimum separation threshold for overlap detection (2% of canvas dimension)
-    val minSeparation = 0.02f
-
-    // Check if two elements overlap
-    fun elementsOverlap(pos1: ElementPosition, pos2: ElementPosition): Boolean {
-        val dx = kotlin.math.abs(pos1.cx - pos2.cx)
-        val dy = kotlin.math.abs(pos1.cy - pos2.cy)
-        val minDistX = (pos1.w + pos2.w) / 2f + minSeparation
-        val minDistY = (pos1.h + pos2.h) / 2f + minSeparation
-        return dx < minDistX && dy < minDistY
+    fun overlapping(id: String): Boolean {
+        val r = positions[id]?.toDeckRect() ?: return false
+        return positions.any { (other, p) -> other != id && LayoutEdit.overlaps(r, p.toDeckRect()) }
     }
 
-    // Check if the selected element overlaps with any other element
-    fun hasOverlap(id: String): Boolean {
-        val pos = editingPositions[id] ?: return false
-        return editingPositions.entries.any { (otherId, otherPos) ->
-            otherId != id && elementsOverlap(pos, otherPos)
-        }
-    }
-
-    BoxWithConstraints(
-        modifier = Modifier
+    Box(
+        Modifier
             .fillMaxSize()
-            .background(PitWall.Ground.copy(alpha = 0.95f))
+            .background(PitWall.Ground.copy(alpha = 0.2f))
+            // Pointer sink: children (handles, chips) hit-test above this, everything else — the
+            // live deck underneath — gets nothing.
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) awaitPointerEvent().changes.forEach { it.consume() }
+                }
+            },
     ) {
-        val canvasWidth = constraints.maxWidth.toFloat()
-        val canvasHeight = constraints.maxHeight.toFloat()
-
-        // Render all draggable elements
-        editingPositions.forEach { (id, position) ->
-            DraggableElement(
+        positions.forEach { (id, position) ->
+            ElementHandle(
                 id = id,
                 position = position,
-                canvasWidth = canvasWidth,
-                canvasHeight = canvasHeight,
-                isSelected = selectedElement == id,
-                hasOverlap = hasOverlap(id),
-                onPositionChange = { newPos ->
-                    editingPositions = editingPositions + (id to newPos)
-                    hasChanges = true
-                },
-                onSelected = {
-                    selectedElement = id
-                }
+                pad = pad,
+                innerW = innerW,
+                innerH = innerH,
+                isSelected = selected == id,
+                hasOverlap = overlapping(id),
+                onSelect = { selected = id },
+                onChange = { onChange(id, it) },
             )
         }
 
-        // Action buttons at the bottom
         Row(
-            modifier = Modifier
+            Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally)
-        ) {
-            // Save button
-            ChipLabel(
-                text = "SAVE",
-                color = PitWall.SignalGreen,
-                onClick = {
-                    onSave(editingPositions)
-                }
-            )
-
-            // Reset button
-            ChipLabel(
-                text = "RESET TO DEFAULT",
-                color = PitWall.Amber,
-                onClick = {
-                    editingPositions = defaultPositions.mapValues { (id, rect) ->
-                        ElementPosition.fromDeckRect(id, rect)
-                    }
-                    hasChanges = true
-                    onReset()
-                }
-            )
-
-            // Cancel button
-            ChipLabel(
-                text = "CANCEL",
-                color = PitWall.SignalRed,
-                onClick = {
-                    if (hasChanges) {
-                        showUnsavedDialog = true
-                    } else {
-                        onCancel()
-                    }
-                }
-            )
-        }
-
-        // Instructions overlay at the top
-        Column(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
                 .background(PitWall.Panel.copy(alpha = 0.9f))
-                .padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text(
-                text = "EDIT LAYOUT - ${mode.uppercase()} MODE",
-                color = PitWall.Ink,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.2.sp
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "Drag elements to reposition • Tap to select • Save when done",
-                color = PitWall.ButtonLabel,
-                fontSize = 12.sp,
-                textAlign = TextAlign.Center
-            )
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "EDIT LAYOUT · ${mode.uppercase()}",
+                    color = PitWall.Ink,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp,
+                )
+                Text(
+                    "Drag to move · drag the corner to resize",
+                    color = PitWall.ButtonLabel,
+                    fontSize = 9.sp,
+                )
+            }
+            ChipLabel("SAVE", PitWall.SignalGreen, onSave)
+            ChipLabel("RESET", PitWall.Amber, onReset)
+            ChipLabel("CANCEL", PitWall.SignalRed) {
+                if (hasChanges) showUnsavedDialog = true else onCancel()
+            }
         }
     }
 
-    // First-time instructions overlay
-    if (showFirstTimeInstructions) {
+    if (showInstructions) {
         FirstTimeInstructionsDialog(
             onDismiss = {
-                showFirstTimeInstructions = false
+                showInstructions = false
                 LayoutPreferences.markEditModeInstructionsSeen(prefs)
-            }
+            },
         )
     }
 
-    // Unsaved changes dialog
     if (showUnsavedDialog) {
         UnsavedChangesDialog(
-            onSave = {
-                onSave(editingPositions)
-                showUnsavedDialog = false
-            },
-            onDiscard = {
-                showUnsavedDialog = false
-                onCancel()
-            },
-            onCancel = {
-                showUnsavedDialog = false
-            }
+            onSave = { showUnsavedDialog = false; onSave() },
+            onDiscard = { showUnsavedDialog = false; onCancel() },
+            onCancel = { showUnsavedDialog = false },
         )
     }
 }
 
+/** Corner grab area for resizing, in dp. */
+private val HANDLE_SIZE = 22.dp
+
 /**
- * Individual draggable control element in edit mode.
- *
- * @param id Element identifier
- * @param position Current element position
- * @param canvasWidth Canvas width in pixels
- * @param canvasHeight Canvas height in pixels
- * @param isSelected Whether this element is currently selected
- * @param hasOverlap Whether this element overlaps with another
- * @param onPositionChange Callback when position changes
- * @param onSelected Callback when element is selected
+ * One element's drag box + resize corner. Positioned with the same expression as the deck's
+ * `place()`, in Dp — the only pixel values here are the raw drag deltas, converted to fractions
+ * once against the inner canvas size.
  */
 @Composable
-private fun DraggableElement(
+private fun ElementHandle(
     id: String,
     position: ElementPosition,
-    canvasWidth: Float,
-    canvasHeight: Float,
+    pad: Dp,
+    innerW: Dp,
+    innerH: Dp,
     isSelected: Boolean,
     hasOverlap: Boolean,
-    onPositionChange: (ElementPosition) -> Unit,
-    onSelected: () -> Unit,
+    onSelect: () -> Unit,
+    onChange: (ElementPosition) -> Unit,
 ) {
-    // Track drag offset
-    var dragOffset by remember { mutableStateOf(Offset.Zero) }
+    // The gesture coroutine outlives recomposition, so it must read the *current* position.
+    val cur by rememberUpdatedState(position)
+    // ...and the *current* callback. pointerInput(id) never restarts, so a captured lambda keeps
+    // merging edits into the map from the composition that installed it — RESET's fresh defaults
+    // would be silently thrown away by the next drag, and SAVE would write the stale ones.
+    val emit by rememberUpdatedState(onChange)
+    val density = LocalDensity.current.density
+    // Same reason as [cur]: read through state rather than adding them as pointerInput keys, which
+    // would tear down the drag detector mid-gesture.
+    val canvasWDp by rememberUpdatedState(innerW.value)
+    val canvasHDp by rememberUpdatedState(innerH.value)
+    val rect = position.toDeckRect()
 
-    // Calculate pixel positions
-    val centerX = (position.cx * canvasWidth) + dragOffset.x
-    val centerY = (position.cy * canvasHeight) + dragOffset.y
-    val width = position.w * canvasWidth
-    val height = position.h * canvasHeight
-
-    // Calculate top-left position for offset
-    val offsetX = (centerX - width / 2f).roundToInt()
-    val offsetY = (centerY - height / 2f).roundToInt()
-
-    // Get display name
-    val displayName = ElementId.entries.find { it.name == id }?.displayName ?: id
+    val outline = when {
+        hasOverlap -> PitWall.SignalRed
+        isSelected -> PitWall.WheelGlow
+        else -> PitWall.TowerGray
+    }
 
     Box(
-        modifier = Modifier
-            .offset { IntOffset(offsetX, offsetY) }
-            .size(width.dp, height.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(
-                when {
-                    hasOverlap -> PitWall.SignalRed.copy(alpha = 0.3f)
-                    isSelected -> PitWall.WheelGlow.copy(alpha = 0.5f)
-                    else -> PitWall.Panel.copy(alpha = 0.7f)
-                }
-            )
-            .border(
-                width = if (isSelected) 3.dp else 2.dp,
-                color = when {
-                    hasOverlap -> PitWall.SignalRed
-                    isSelected -> PitWall.WheelGlow
-                    else -> PitWall.PanelBorder
-                },
-                shape = RoundedCornerShape(8.dp)
-            )
-            .pointerInput(id) {
-                detectDragGestures(
-                    onDragStart = {
-                        onSelected()
-                        dragOffset = Offset.Zero
-                    },
-                    onDrag = { change, dragAmount ->
-                        change.consume()
-                        dragOffset += dragAmount
-                    },
-                    onDragEnd = {
-                        // Calculate new fractional position with drag offset applied
-                        val newCx = ((position.cx * canvasWidth + dragOffset.x) / canvasWidth)
-                            .coerceIn(position.w / 2f, 1f - position.w / 2f)
-                        val newCy = ((position.cy * canvasHeight + dragOffset.y) / canvasHeight)
-                            .coerceIn(position.h / 2f, 1f - position.h / 2f)
-
-                        // Snap to valid position
-                        val newPosition = ElementPosition.create(
-                            id = id,
-                            cx = newCx,
-                            cy = newCy,
-                            w = position.w,
-                            h = position.h
-                        )
-
-                        onPositionChange(newPosition)
-                        dragOffset = Offset.Zero
-                    }
+        Modifier
+            .offset(x = pad + innerW * rect.left, y = pad + innerH * rect.top)
+            .size(width = innerW * rect.w, height = innerH * rect.h)
+            .drawBehind {
+                drawRoundRect(
+                    color = outline,
+                    cornerRadius = CornerRadius(6.dp.toPx()),
+                    style = Stroke(
+                        width = if (isSelected || hasOverlap) 2.dp.toPx() else 1.dp.toPx(),
+                        pathEffect = PathEffect.dashPathEffect(
+                            floatArrayOf(6.dp.toPx(), 5.dp.toPx()),
+                        ),
+                    ),
                 )
             }
-            .alpha(if (dragOffset != Offset.Zero) 0.7f else 1f),
-        contentAlignment = Alignment.Center
+            .pointerInput(id) { detectTapGestures(onTap = { onSelect() }) }
+            .pointerInput(id) {
+                detectDragGestures(
+                    onDragStart = { onSelect() },
+                    onDrag = { change, drag ->
+                        change.consume()
+                        emit(
+                            LayoutEdit.moved(
+                                cur,
+                                cur.cx + (drag.x / density) / canvasWDp,
+                                cur.cy + (drag.y / density) / canvasHDp,
+                            ),
+                        )
+                    },
+                )
+            },
     ) {
-        // Element label
-        Text(
-            text = displayName,
-            color = PitWall.Ink,
-            fontSize = 10.sp,
-            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(4.dp)
-        )
-
-        // Overlap warning indicator
         if (hasOverlap) {
             Text(
-                text = "⚠",
+                "⚠",
                 color = PitWall.SignalRed,
-                fontSize = 20.sp,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(4.dp)
+                fontSize = 14.sp,
+                modifier = Modifier.align(Alignment.TopEnd).padding(2.dp),
             )
+        }
+        if (isSelected) {
+            Box(
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .size(HANDLE_SIZE)
+                    .clip(RoundedCornerShape(topStart = 8.dp, topEnd = 0.dp, bottomEnd = 6.dp, bottomStart = 0.dp))
+                    .background(PitWall.WheelGlow.copy(alpha = 0.85f))
+                    .pointerInput(id) {
+                        detectDragGestures(
+                            onDrag = { change, drag ->
+                                change.consume()
+                                emit(
+                                    LayoutEdit.resized(
+                                        cur,
+                                        cur.w + (drag.x / density) / canvasWDp,
+                                        cur.h + (drag.y / density) / canvasHDp,
+                                        canvasWDp,
+                                        canvasHDp,
+                                    ),
+                                )
+                            },
+                        )
+                    },
+            ) {
+                Text(
+                    "⤡",
+                    color = PitWall.Ink,
+                    fontSize = 12.sp,
+                    modifier = Modifier.align(Alignment.Center),
+                )
+            }
         }
     }
 }
 
 /**
  * Dialog shown when user attempts to exit edit mode with unsaved changes.
- *
- * @param onSave Callback to save changes and exit
- * @param onDiscard Callback to discard changes and exit
- * @param onCancel Callback to cancel exit and continue editing
  */
 @Composable
 private fun UnsavedChangesDialog(
@@ -355,45 +280,28 @@ private fun UnsavedChangesDialog(
                 color = PitWall.Ink,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
-                letterSpacing = 1.2.sp
+                letterSpacing = 1.2.sp,
             )
         },
         text = {
             Text(
                 text = "You have unsaved layout changes. What would you like to do?",
                 color = PitWall.ButtonLabel,
-                fontSize = 14.sp
+                fontSize = 14.sp,
             )
         },
         confirmButton = {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                ChipLabel(
-                    text = "SAVE",
-                    color = PitWall.SignalGreen,
-                    onClick = onSave
-                )
-                ChipLabel(
-                    text = "DISCARD",
-                    color = PitWall.SignalRed,
-                    onClick = onDiscard
-                )
-                ChipLabel(
-                    text = "CANCEL",
-                    color = PitWall.TowerGray,
-                    onClick = onCancel
-                )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ChipLabel("SAVE", PitWall.SignalGreen, onSave)
+                ChipLabel("DISCARD", PitWall.SignalRed, onDiscard)
+                ChipLabel("CANCEL", PitWall.TowerGray, onCancel)
             }
-        }
+        },
     )
 }
 
 /**
  * Dialog shown when user enters edit mode for the first time.
- * Provides brief instructions on how to use the layout editor.
- *
- * @param onDismiss Callback when user dismisses the instructions
  */
 @Composable
 private fun FirstTimeInstructionsDialog(
@@ -404,62 +312,38 @@ private fun FirstTimeInstructionsDialog(
         containerColor = PitWall.Panel,
         title = {
             Text(
-                text = "WELCOME TO LAYOUT EDITOR",
+                text = "LAYOUT EDITOR",
                 color = PitWall.Ink,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.2.sp,
                 textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
             )
         },
         text = {
-            Column(
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    text = "Customize your controller layout with drag-and-drop!",
+                    text = "Your real controls stay on screen — move and resize them in place.",
                     color = PitWall.Ink,
                     fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.SemiBold,
                 )
-                
-                InstructionItem(
-                    icon = "👆",
-                    text = "Tap any element to select it"
-                )
-                
-                InstructionItem(
-                    icon = "✋",
-                    text = "Drag elements to reposition them"
-                )
-                
-                InstructionItem(
-                    icon = "⚠",
-                    text = "Watch for overlap warnings"
-                )
-                
-                InstructionItem(
-                    icon = "💾",
-                    text = "Tap SAVE to keep your changes"
-                )
-                
+                InstructionItem("👆", "Tap a control to select it")
+                InstructionItem("✋", "Drag it anywhere on the deck")
+                InstructionItem("⤡", "Drag the corner handle to resize (44 dp minimum)")
+                InstructionItem("⚠", "A red dashed outline means it overlaps another control")
+                InstructionItem("💾", "SAVE applies it to the deck straight away")
                 Text(
-                    text = "Tip: You can reset to default layout anytime!",
+                    text = "Tip: outside the editor, long-press R/N/D to tell the app which gear the truck is really in.",
                     color = PitWall.Amber,
                     fontSize = 12.sp,
                     fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
-                    modifier = Modifier.padding(top = 4.dp)
+                    modifier = Modifier.padding(top = 4.dp),
                 )
             }
         },
-        confirmButton = {
-            ChipLabel(
-                text = "GOT IT",
-                color = PitWall.SignalGreen,
-                onClick = onDismiss
-            )
-        }
+        confirmButton = { ChipLabel("GOT IT", PitWall.SignalGreen, onDismiss) },
     )
 }
 
@@ -473,45 +357,9 @@ private fun InstructionItem(
 ) {
     Row(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            text = icon,
-            fontSize = 20.sp
-        )
-        Text(
-            text = text,
-            color = PitWall.ButtonLabel,
-            fontSize = 13.sp
-        )
-    }
-}
-
-/**
- * Reusable chip-style button label used throughout the UI.
- * Extracted here to match the KeymapPanel style.
- */
-@Composable
-private fun ChipLabel(
-    text: String,
-    color: Color,
-    onClick: () -> Unit,
-) {
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(6.dp))
-            .background(color.copy(alpha = 0.15f))
-            .border(1.dp, color, RoundedCornerShape(6.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = text,
-            color = color,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 0.8.sp
-        )
+        Text(text = icon, fontSize = 18.sp)
+        Text(text = text, color = PitWall.ButtonLabel, fontSize = 13.sp)
     }
 }

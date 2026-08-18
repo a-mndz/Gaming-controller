@@ -79,6 +79,14 @@ public readonly struct InputFrame
     public bool IsConfig => (Flags & Proto.FlagConfig) != 0;
 
     /// <summary>
+    /// True only for plain input snapshots. Every control frame (ping, hello, config, rumble, ack,
+    /// reject) is built from a zeroed buffer, so its axes and buttons are all 0 — applying one to
+    /// the pad centres the wheel, drops the pedals and releases every held key. Control frames must
+    /// refresh the keepalive clock and nothing else.
+    /// </summary>
+    public bool CarriesInput => (Flags & Proto.ControlFlags) == 0;
+
+    /// <summary>
     /// Config-frame payload: ButtonsHi[0] = char count, ButtonsHi[1] + the 16 axis bytes carry the
     /// ASCII characters (little-endian order). Max 17 chars — key names fit with room to spare.
     /// </summary>

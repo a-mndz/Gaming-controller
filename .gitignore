@@ -21,6 +21,7 @@ captures/
 .cxx/
 release/
 .kotlin/
+build-and-deploy.ps1
 
 # Kotlin / Java
 *.class
@@ -37,6 +38,7 @@ Desktop.ini
 # Agent & tool states
 .kilocode/
 .opencode/
+.claude/
 .kilo/
 .kiro/
 .gemini/
