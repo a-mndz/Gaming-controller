@@ -93,6 +93,7 @@ fun TruckDeck2(
     var keymap by remember { mutableStateOf(loadKeymap(prefs)) }
     var showKeys by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
+    var showEditLayout by remember { mutableStateOf(false) }
     var gear by remember { mutableStateOf("D") }
 
     val gyro = remember { GyroSteering(context) }
@@ -199,6 +200,70 @@ fun TruckDeck2(
             },
             onRemap = { action, key -> keymap = (keymap + (action to key)).toMutableMap() },
             onClose = { showKeys = false },
+            onDisconnect = {
+                transport.close()
+                onOpenConnection()
+            },
+            onEditLayout = {
+                tick()
+                showKeys = false
+                showEditLayout = true
+            },
+        )
+        return
+    }
+    
+    if (showEditLayout) {
+        val aspect = remember { 16f / 9f } // Use standard aspect for edit mode
+        
+        // Create default positions map from DeckLayout for all elements in current mode
+        val defaultPositions = remember(mode, aspect) {
+            buildMap {
+                put("LIGHTS", DeckLayout.utilBtn(0, aspect))
+                put("WIPER", DeckLayout.utilBtn(1, aspect))
+                put("VIPER", DeckLayout.utilBtn(2, aspect))
+                put("HANDBRAKE", DeckLayout.topRightBtn(0, aspect))
+                put("SETTINGS", DeckLayout.topRightBtn(1, aspect))
+                put("MENU", DeckLayout.topRightBtn(2, aspect))
+                put("CAMERA", DeckLayout.camera(aspect))
+                put("GEAR", DeckLayout.gearSel())
+                put("INDICATORS", DeckLayout.arrows())
+                
+                if (mode == "gyro") {
+                    put("GYRO_ACCEL", DeckLayout.gyroAccel())
+                    put("GYRO_BRAKE", DeckLayout.gyroBrake())
+                } else {
+                    put("WHEEL", DeckLayout.wheel(aspect))
+                    put("BRAKE", DeckLayout.brake())
+                    put("ACCEL", DeckLayout.accel())
+                }
+            }
+        }
+        
+        // Load current custom positions (or empty map if none exist)
+        val currentCustomPositions = remember(mode) {
+            LayoutPreferences.load(prefs, mode) ?: emptyMap()
+        }
+        
+        LayoutEditPanel(
+            prefs = prefs,
+            mode = mode,
+            defaultPositions = defaultPositions,
+            customPositions = currentCustomPositions,
+            onSave = { newPositions ->
+                tick()
+                LayoutPreferences.save(prefs, mode, newPositions)
+                showEditLayout = false
+            },
+            onReset = {
+                tick()
+                LayoutPreferences.clear(prefs, mode)
+                showEditLayout = false
+            },
+            onCancel = {
+                tick()
+                showEditLayout = false
+            },
         )
         return
     }
@@ -212,31 +277,45 @@ fun TruckDeck2(
         val innerW = maxWidth - pad * 2
         val innerH = maxHeight - pad * 2
         val aspect = if (innerH > 0.dp) innerW / innerH else DeckLayout.ASPECT
+        
+        // Load custom positions for the current mode, falling back to null if corrupted/missing
+        val customPositions = remember(mode) {
+            LayoutPreferences.load(prefs, mode)
+        }
+        
+        /**
+         * Get the position rectangle for an element, checking custom positions first,
+         * then falling back to default DeckLayout positions.
+         */
+        fun getElementRect(id: String, defaultRect: DeckRect): DeckRect {
+            return customPositions?.get(id)?.toDeckRect() ?: defaultRect
+        }
+        
         fun place(r: DeckRect) = Modifier
             .offset(x = pad + innerW * r.left, y = pad + innerH * r.top)
             .size(width = innerW * r.w, height = innerH * r.h)
 
         UtilButton(
             label = "LIGHTS", description = "pad:LIGHTS", tint = PitWall.ButtonLabel,
-            modifier = place(DeckLayout.utilBtn(0, aspect)),
+            modifier = place(getElementRect("LIGHTS", DeckLayout.utilBtn(0, aspect))),
             onPress = { on -> deck.setInput { setHi(it, ButtonHi.LIGHTS, on) } },
         ) { tint, m -> DeckIcons.lights(tint, m) }
         UtilButton(
             label = "WIPER", description = "pad:WIPER", tint = PitWall.ButtonLabel,
-            modifier = place(DeckLayout.utilBtn(1, aspect)),
+            modifier = place(getElementRect("WIPER", DeckLayout.utilBtn(1, aspect))),
             onPress = { down -> if (down) tapHi(ButtonHi.WIPERS, 120, { wiperBusy }, { wiperBusy = it }) },
         ) { tint, m -> DeckIcons.wiper(tint, m) }
         UtilButton(
             label = "VIPER", description = "pad:VIPER", tint = PitWall.ButtonLabel,
-            modifier = place(DeckLayout.utilBtn(2, aspect)),
+            modifier = place(getElementRect("VIPER", DeckLayout.utilBtn(2, aspect))),
             onPress = { down -> if (down) tapHi(ButtonHi.WIPERS, 700, { washerBusy }, { washerBusy = it }) },
         ) { tint, m -> DeckIcons.viper(tint, m) }
 
-        GearSelector(gear, ::selectGear, place(DeckLayout.gearSel()))
+        GearSelector(gear, ::selectGear, place(getElementRect("GEAR", DeckLayout.gearSel())))
 
         UtilButton(
             label = "HANDBRAKE", description = "pad:HANDBRAKE", tint = PitWall.SignalRed,
-            modifier = place(DeckLayout.topRightBtn(0, aspect)),
+            modifier = place(getElementRect("HANDBRAKE", DeckLayout.topRightBtn(0, aspect))),
             isTransparent = true,
             labelColor = PitWall.SignalRed,
             onPress = { on -> deck.setInput { setHi(it, ButtonHi.HANDBRAKE, on) } },
@@ -244,21 +323,21 @@ fun TruckDeck2(
 
         UtilButton(
             label = "SETTINGS", description = "pad:SETTINGS", tint = PitWall.ButtonLabel,
-            modifier = place(DeckLayout.topRightBtn(1, aspect)),
+            modifier = place(getElementRect("SETTINGS", DeckLayout.topRightBtn(1, aspect))),
             onPress = { showKeys = true },
         ) { tint, m -> DeckIcons.gearWheel(tint, m) }
 
         UtilButton(
             label = "MENU", description = "pad:MENU", tint = PitWall.ButtonLabel,
-            modifier = place(DeckLayout.topRightBtn(2, aspect)),
+            modifier = place(getElementRect("MENU", DeckLayout.topRightBtn(2, aspect))),
             onPress = { showMenu = true },
         ) { tint, m -> DeckIcons.bars(tint, m) }
 
-        SignalPair(deck, ::tick, place(DeckLayout.arrows()))
+        SignalPair(deck, ::tick, place(getElementRect("INDICATORS", DeckLayout.arrows())))
 
         UtilButton(
             label = "CAMERA", description = "pad:CAMERA", tint = PitWall.ButtonLabel,
-            modifier = place(DeckLayout.camera(aspect)),
+            modifier = place(getElementRect("CAMERA", DeckLayout.camera(aspect))),
             onPress = { down ->
                 if (down) tick()
                 deck.setInput { setLo(it, ButtonLo.BACK, down) }
@@ -272,7 +351,7 @@ fun TruckDeck2(
                 tick = ::tick,
                 axis = AX_RT,
                 ridgeCount = 8,
-                modifier = place(DeckLayout.gyroAccel()),
+                modifier = place(getElementRect("GYRO_ACCEL", DeckLayout.gyroAccel())),
             )
             MetallicPedal(
                 label = "BRAKE",
@@ -280,7 +359,7 @@ fun TruckDeck2(
                 tick = ::tick,
                 axis = AX_LT,
                 ridgeCount = 6,
-                modifier = place(DeckLayout.gyroBrake()),
+                modifier = place(getElementRect("GYRO_BRAKE", DeckLayout.gyroBrake())),
             )
         } else {
             WheelControl(
@@ -290,11 +369,11 @@ fun TruckDeck2(
                 onSteer = ::setSteer,
                 onRecenter = { },
                 tick = ::tick,
-                modifier = place(DeckLayout.wheel(aspect)),
+                modifier = place(getElementRect("WHEEL", DeckLayout.wheel(aspect))),
             )
 
-            MetallicPedal("BRAKE", deck, ::tick, AX_LT, ridgeCount = 5, modifier = place(DeckLayout.brake()))
-            MetallicPedal("ACCELERATOR", deck, ::tick, AX_RT, ridgeCount = 8, modifier = place(DeckLayout.accel()))
+            MetallicPedal("BRAKE", deck, ::tick, AX_LT, ridgeCount = 5, modifier = place(getElementRect("BRAKE", DeckLayout.brake())))
+            MetallicPedal("ACCELERATOR", deck, ::tick, AX_RT, ridgeCount = 8, modifier = place(getElementRect("ACCEL", DeckLayout.accel())))
         }
 
         if (showMenu) {

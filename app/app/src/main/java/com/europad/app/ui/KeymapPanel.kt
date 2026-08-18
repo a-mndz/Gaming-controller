@@ -50,6 +50,8 @@ fun KeymapPanel(
     onCycleGyroRange: () -> Unit = {},
     onRemap: (String, String) -> Unit,
     onClose: () -> Unit,
+    onDisconnect: () -> Unit = {},
+    onEditLayout: () -> Unit = {},
 ) {
     var picking by remember { mutableStateOf<String?>(null) }
 
@@ -83,6 +85,8 @@ fun KeymapPanel(
                 ChipLabel("WHEEL: $wheelRangeDeg°", PitWall.WheelGlow) { onCycleWheelRange() }
             }
 
+            ChipLabel("EDIT LAYOUT", PitWall.Indigo) { onEditLayout() }
+            ChipLabel("DISCONNECT", PitWall.SignalRed) { onDisconnect() }
             ChipLabel("DONE", PitWall.TowerGray) { onClose() }
         }
         Spacer(Modifier.padding(4.dp))
