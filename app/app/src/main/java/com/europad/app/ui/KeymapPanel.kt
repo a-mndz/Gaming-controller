@@ -33,12 +33,17 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.europad.app.input.SteerReturn
 import com.europad.app.net.FrameEncoder
 import com.europad.app.net.UdpTransport
 
-/** Range of the RETURN TO CENTRE slider, in ms. */
-private const val RETURN_MS_MIN = 60f
-private const val RETURN_MS_MAX = 900f
+/**
+ * Range of the RETURN TO CENTRE slider, in ms — the same bounds the return profile itself clamps to,
+ * so the slider cannot offer a value that gets silently coerced. The floor moved up from 60 ms: a
+ * return that fast is why the truck used to keep its turn (see [SteerReturn]).
+ */
+private val RETURN_MS_MIN = SteerReturn.MIN_MS.toFloat()
+private val RETURN_MS_MAX = SteerReturn.MAX_MS.toFloat()
 
 /**
  * On-phone remapping: every action shows its current key; tapping it opens the picker. A change
@@ -56,7 +61,7 @@ fun KeymapPanel(
     mode: String = "wheel",
     wheelRangeDeg: Int = 360,
     gyroRangeDeg: Int = 180,
-    returnMs: Int = 250,
+    returnMs: Int = 420,
     pendingKeys: Set<String> = emptySet(),
     sentKeys: Set<String> = emptySet(),
     onToggleMode: () -> Unit = {},

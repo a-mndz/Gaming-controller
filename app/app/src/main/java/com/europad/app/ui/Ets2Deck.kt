@@ -3,9 +3,6 @@ package com.europad.app.ui
 import android.content.SharedPreferences
 import android.graphics.Paint
 import android.graphics.Typeface
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -26,6 +23,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -38,6 +37,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -65,6 +65,7 @@ import com.europad.app.input.DeckEngine
 import com.europad.app.input.GyroSteering
 import com.europad.app.input.InputFrame
 import com.europad.app.input.PedalStage
+import com.europad.app.input.SteerReturn
 import com.europad.app.net.ConnState
 import com.europad.app.net.FrameEncoder
 import com.europad.app.net.UdpTransport
@@ -91,7 +92,9 @@ fun TruckDeck2(
     val scope = rememberCoroutineScope()
     val view = LocalView.current
     val deck = remember(transport) {
-        DeckEngine(transport, scope).also { it.startSender(120) }
+        // 250 is a ceiling, not a metronome: frames leave the instant an input changes and the
+        // heartbeat re-states the snapshot every 12 ms so a lost datagram cannot strand the truck.
+        DeckEngine(transport, scope).also { it.startSender(rateHz = 250, heartbeatMs = 12L) }
     }
 
     var mode by remember { mutableStateOf(prefs.getString("truckMode", null) ?: "wheel") }
@@ -113,6 +116,7 @@ fun TruckDeck2(
         onDispose {
             deck.stopSender()
             deck.neutralize()
+            gyro.onSteer = null
             gyro.stop()
         }
     }
@@ -120,38 +124,59 @@ fun TruckDeck2(
     var gyroFailed by remember { mutableStateOf(false) }
     var steer by remember { mutableFloatStateOf(0f) }
     var wheelRangeDeg by remember { mutableStateOf(prefs.getInt("wheelRange", 360)) }
-    var wheelReturnMs by remember { mutableIntStateOf(prefs.getInt("wheelReturnMs", 250)) }
+    var wheelReturnMs by remember { mutableIntStateOf(prefs.getInt("wheelReturnMs", 420)) }
     var gyroRangeDeg by remember { mutableStateOf(prefs.getInt("gyroRange", 180)) }
+    // Stored as whole percent so SharedPreferences stays Int-only and the UI can step in units.
+    var gyroCurvePct by remember { mutableIntStateOf(prefs.getInt("gyroCurvePct", 35)) }
+    var gyroSmoothMs by remember { mutableIntStateOf(prefs.getInt("gyroSmoothMs", 22)) }
+    var counterPct by remember { mutableIntStateOf(prefs.getInt("steerCounterPct", 10)) }
     var deadzone by remember { mutableFloatStateOf(0.05f) }
     gyro.rangeDeg = gyroRangeDeg.toFloat()
     gyro.deadzone = deadzone
+    gyro.curve = gyroCurvePct / 100f
+    gyro.smoothingMs = gyroSmoothMs.toFloat()
 
     fun tick() {
         view.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
     }
 
+    /**
+     * Writes the steering axis only. Safe from any thread — [DeckEngine.setInput] is synchronized —
+     * which is what lets the gyro push samples straight from its sensor thread.
+     */
+    fun sendSteer(s: Float) {
+        deck.setInput { it.axes[AX_STEER] = (s.coerceIn(-1f, 1f) * Short.MAX_VALUE).toInt().toShort() }
+    }
+
+    /** Axis plus the on-screen wheel angle. Main thread only, because it writes Compose state. */
     fun setSteer(s: Float) {
         steer = s.coerceIn(-1f, 1f)
-        deck.setInput { it.axes[AX_STEER] = (steer * Short.MAX_VALUE).toInt().toShort() }
+        sendSteer(steer)
     }
 
     LaunchedEffect(mode) {
         if (mode != "gyro") {
+            gyro.onSteer = null
             gyro.stop()
             setSteer(0f) // stopping the sensor never zeroed the axis: the last tilt stayed latched
             return@LaunchedEffect
         }
+        // The axis leaves on the sensor thread the moment a sample lands: no poll interval to wait
+        // out, no queueing behind Compose on the main thread. The loop below only drives the graphic.
+        gyro.onSteer = { s -> sendSteer(s) }
         if (!gyro.start()) {
             gyroFailed = true
+            gyro.onSteer = null
             mode = "wheel"
             prefs.edit().putString("truckMode", "wheel").apply()
             return@LaunchedEffect
         }
         gyro.recenter()
         while (mode == "gyro") {
-            setSteer(gyro.currentSteer())
-            delay(8)
+            steer = gyro.currentSteer()
+            delay(24) // ~40 fps is plenty for a wheel graphic and keeps recomposition off the hot path
         }
+        gyro.onSteer = null
     }
 
     var rtt by remember { mutableLongStateOf(-1L) }
@@ -189,6 +214,45 @@ fun TruckDeck2(
     var gearBusy by remember { mutableStateOf(false) }
     var wiperBusy by remember { mutableStateOf(false) }
     var washerBusy by remember { mutableStateOf(false) }
+
+    /**
+     * One place that owns clamping and persistence for every fine adjuster in the MENU sheet, so the
+     * sheet only has to say which setting moved and in which direction.
+     */
+    fun tune(setting: String, dir: Int) {
+        tick()
+        val edit = prefs.edit()
+        when (setting) {
+            "gyroRange" -> {
+                gyroRangeDeg = adjustSetting(gyroRangeDeg, dir, GYRO_RANGE_STEP, GYRO_RANGE_MIN, GYRO_RANGE_MAX)
+                gyro.rangeDeg = gyroRangeDeg.toFloat()
+                edit.putInt("gyroRange", gyroRangeDeg)
+            }
+            "gyroCurve" -> {
+                gyroCurvePct = adjustSetting(gyroCurvePct, dir, CURVE_STEP, 0, 100)
+                gyro.curve = gyroCurvePct / 100f
+                edit.putInt("gyroCurvePct", gyroCurvePct)
+            }
+            "gyroSmooth" -> {
+                gyroSmoothMs = adjustSetting(gyroSmoothMs, dir, SMOOTH_STEP, SMOOTH_MIN, SMOOTH_MAX)
+                gyro.smoothingMs = gyroSmoothMs.toFloat()
+                edit.putInt("gyroSmoothMs", gyroSmoothMs)
+            }
+            "wheelRange" -> {
+                wheelRangeDeg = adjustSetting(wheelRangeDeg, dir, WHEEL_RANGE_STEP, WHEEL_RANGE_MIN, WHEEL_RANGE_MAX)
+                edit.putInt("wheelRange", wheelRangeDeg)
+            }
+            "return" -> {
+                wheelReturnMs = adjustSetting(wheelReturnMs, dir, RETURN_STEP, SteerReturn.MIN_MS, SteerReturn.MAX_MS)
+                edit.putInt("wheelReturnMs", wheelReturnMs)
+            }
+            "counter" -> {
+                counterPct = adjustSetting(counterPct, dir, COUNTER_STEP, COUNTER_MIN, COUNTER_MAX)
+                edit.putInt("steerCounterPct", counterPct)
+            }
+        }
+        edit.apply()
+    }
 
     fun tapHi(bits: Int, ms: Long, busy: () -> Boolean, setBusy: (Boolean) -> Unit) {
         if (busy()) return
@@ -419,6 +483,7 @@ fun TruckDeck2(
             WheelControl(
                 wheelRangeDeg = wheelRangeDeg,
                 returnMs = wheelReturnMs,
+                counterFraction = counterPct / 100f,
                 onSteer = ::setSteer,
                 tick = ::tick,
                 modifier = place("WHEEL", DeckLayout.wheel(aspect)),
@@ -474,9 +539,14 @@ fun TruckDeck2(
                 gyroFailed = gyroFailed,
                 wheelRangeDeg = wheelRangeDeg,
                 gyroRangeDeg = gyroRangeDeg,
+                gyroCurvePct = gyroCurvePct,
+                gyroSmoothMs = gyroSmoothMs,
+                returnMs = wheelReturnMs,
+                counterPct = counterPct,
                 rtt = rtt,
                 loss = loss,
                 transportName = transport.transport,
+                onTune = ::tune,
                 onToggleMode = {
                     if (!(mode == "wheel" && gyroFailed)) {
                         tick()
@@ -505,11 +575,48 @@ fun TruckDeck2(
     }
 }
 
-private val WHEEL_RANGES = intArrayOf(180, 270, 360, 540, 900)
-private fun nextWheelRange(cur: Int): Int = WHEEL_RANGES[(WHEEL_RANGES.indexOf(cur) + 1 + WHEEL_RANGES.size) % WHEEL_RANGES.size]
+/**
+ * Quick-chip presets. The chips in the KEY BINDINGS panel cycle these; the MENU sheet steps the same
+ * settings in fine increments (see [adjustSetting]) for the precision the presets cannot give.
+ */
+private val WHEEL_RANGES = intArrayOf(180, 270, 360, 450, 540, 720, 900)
+private val GYRO_RANGES = intArrayOf(60, 90, 120, 180, 240, 300, 360)
 
-private val GYRO_RANGES = intArrayOf(90, 180, 270, 360)
-private fun nextGyroRange(cur: Int): Int = GYRO_RANGES[(GYRO_RANGES.indexOf(cur) + 1 + GYRO_RANGES.size) % GYRO_RANGES.size]
+/** Next preset strictly above [cur], wrapping — tolerant of a [cur] the fine stepper produced. */
+private fun nextPreset(presets: IntArray, cur: Int): Int = presets.firstOrNull { it > cur } ?: presets.first()
+
+// Internal, not private: the deck picker offers the same two chips and must cycle the same presets,
+// or a value set in one screen jumps somewhere unexpected in the other.
+internal fun nextWheelRange(cur: Int): Int = nextPreset(WHEEL_RANGES, cur)
+internal fun nextGyroRange(cur: Int): Int = nextPreset(GYRO_RANGES, cur)
+
+// Fine adjuster bounds. Steering feel is personal and load-dependent, and a four-item cycle cannot
+// express "a bit less than 180" — these give 20-40 usable levels per setting instead of 4 or 5.
+private const val WHEEL_RANGE_MIN = 160
+private const val WHEEL_RANGE_MAX = 900
+private const val WHEEL_RANGE_STEP = 20
+private const val GYRO_RANGE_MIN = 40
+private const val GYRO_RANGE_MAX = 360
+private const val GYRO_RANGE_STEP = 10
+private const val RETURN_STEP = 40
+private const val CURVE_STEP = 5
+private const val SMOOTH_MIN = 0
+private const val SMOOTH_MAX = 80
+private const val SMOOTH_STEP = 4
+private const val COUNTER_MIN = 0
+private const val COUNTER_MAX = 30
+private const val COUNTER_STEP = 2
+
+/**
+ * One step of a fine adjuster, snapped to the step grid and clamped.
+ *
+ * Snapping matters because the coarse chips can leave a value off-grid (e.g. 450 with a step of 20):
+ * without it the first tap would move by an odd amount and every value after that stays misaligned.
+ */
+private fun adjustSetting(cur: Int, dir: Int, step: Int, min: Int, max: Int): Int {
+    val grid = ((cur.toFloat() / step).let { if (dir > 0) kotlin.math.floor(it) else kotlin.math.ceil(it) }).toInt()
+    return ((grid + dir) * step).coerceIn(min, max)
+}
 
 @Composable
 private fun UtilButton(
@@ -687,32 +794,49 @@ private fun SignalSeg(bit: Int, pointRight: Boolean, deck: DeckEngine, tick: () 
 private fun WheelControl(
     wheelRangeDeg: Int = 360,
     returnMs: Int,
+    counterFraction: Float,
     onSteer: (Float) -> Unit,
     tick: () -> Unit,
     modifier: Modifier,
 ) {
     val coroutineScope = rememberCoroutineScope()
     var currentAngleDeg by remember { mutableFloatStateOf(0f) }
-    val animatedAngle = remember { Animatable(0f) }
-    val maxTurnDeg = (wheelRangeDeg / 2f).coerceIn(90f, 450f)
+    val maxTurnDeg = (wheelRangeDeg / 2f).coerceIn(80f, 450f)
     // Held so a re-grab can cancel the return synchronously instead of racing it.
     var returnJob by remember { mutableStateOf<Job?>(null) }
     var dragging by remember { mutableStateOf(false) }
 
+    /**
+     * Rolls the wheel home the way a hand does, streaming every intermediate angle.
+     *
+     * The previous version animated to 0 with a tween and, in the app, worked perfectly — the graphic
+     * centred and the axis ended at exactly 0, confirmed in Windows' controller panel. ETS2 still held
+     * the turn, because it moves its own virtual wheel *towards* the axis at a limited rate instead of
+     * snapping to it: 250 ms was faster than the game could track, so the axis arrived at centre while
+     * the game's wheel was still out at the corner with no displacement left to bring it back.
+     *
+     * [SteerReturn] fixes that from both ends — a slower, angle-scaled sweep the rate limiter can
+     * follow, and a small counter-steer past centre that pulls the game's wheel through zero before
+     * settling. Driven by a plain clock rather than an Animatable so the profile is the unit-tested
+     * function and the graphic and the axis cannot disagree about where the wheel is.
+     */
     fun returnToCenter() {
         returnJob?.cancel()
+        val from = (currentAngleDeg / maxTurnDeg).coerceIn(-1f, 1f)
         returnJob = coroutineScope.launch {
-            animatedAngle.snapTo(currentAngleDeg)
-            // tween, not spring: an under-damped spring overshot through 0 (the truck counter-steered)
-            // and StiffnessLow took ~1.5 s, so the axis was still swinging long after the graphic
-            // looked centred. Monotonic, ends at exactly 0, and the user picks the duration.
-            animatedAngle.animateTo(0f, tween(returnMs, easing = FastOutSlowInEasing)) {
-                if (!dragging) {
-                    currentAngleDeg = value
-                    onSteer((currentAngleDeg / maxTurnDeg).coerceIn(-1f, 1f))
-                }
+            val total = SteerReturn.durationFor(from, returnMs)
+            val startedAt = System.nanoTime() / 1_000_000L
+            while (!dragging) {
+                val elapsed = System.nanoTime() / 1_000_000L - startedAt
+                val value = SteerReturn.valueAt(from, elapsed, total, counterFraction)
+                currentAngleDeg = value * maxTurnDeg
+                onSteer(value)
+                if (elapsed >= total) break
+                // ~120 Hz: finer than the display and finer than the sender's ceiling, so the game
+                // sees a continuous ramp rather than a staircase.
+                delay(8)
             }
-            // Guarantees the final axis value even if the animation was cut short.
+            // Guarantees the final axis value even if the loop was cut short mid-sweep.
             if (!dragging) {
                 currentAngleDeg = 0f
                 onSteer(0f)
@@ -1014,9 +1138,15 @@ private fun OptionsSheet(
     gyroFailed: Boolean,
     wheelRangeDeg: Int,
     gyroRangeDeg: Int,
+    gyroCurvePct: Int,
+    gyroSmoothMs: Int,
+    returnMs: Int,
+    counterPct: Int,
     rtt: Long = -1L,
     loss: Int = 0,
     transportName: String = "UDP",
+    /** (setting id, -1 or +1) — the deck owns clamping and persistence. */
+    onTune: (String, Int) -> Unit,
     onToggleMode: () -> Unit,
     onCenter: () -> Unit,
     onCycleWheelRange: () -> Unit,
@@ -1034,14 +1164,15 @@ private fun OptionsSheet(
     ) {
         Column(
             Modifier
-                .fillMaxWidth(0.65f)
-                .widthIn(max = 420.dp)
+                .fillMaxWidth(0.78f)
+                .widthIn(max = 470.dp)
                 .clip(RoundedCornerShape(12.dp))
                 .background(PitWall.Panel)
                 .border(1.dp, PitWall.PanelBorder, RoundedCornerShape(12.dp))
                 .pointerInput(Unit) { detectTapGestures(onTap = {}) }
+                .verticalScroll(rememberScrollState())
                 .padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Row(
                 Modifier.fillMaxWidth(),
@@ -1078,10 +1209,30 @@ private fun OptionsSheet(
 
             if (mode == "gyro") {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("TILT RANGE", color = PitWall.TowerGray, fontSize = 10.sp, letterSpacing = 1.sp)
-                    ChipLabel("$gyroRangeDeg° (LOCK TO LOCK)", PitWall.WheelGlow, onCycleGyroRange)
+                    ChipLabel("$gyroRangeDeg° PRESET", PitWall.WheelGlow, onCycleGyroRange)
                     ChipLabel("SET CENTRE", PitWall.Amber, onCenter)
                 }
+                AdjustRow(
+                    label = "TILT RANGE",
+                    value = "$gyroRangeDeg°",
+                    hint = "lock to lock — lower is sharper",
+                    onDown = { onTune("gyroRange", -1) },
+                    onUp = { onTune("gyroRange", +1) },
+                )
+                AdjustRow(
+                    label = "PRECISION",
+                    value = if (gyroCurvePct == 0) "LINEAR" else "$gyroCurvePct%",
+                    hint = "softens small tilts, keeps full lock",
+                    onDown = { onTune("gyroCurve", -1) },
+                    onUp = { onTune("gyroCurve", +1) },
+                )
+                AdjustRow(
+                    label = "SMOOTHING",
+                    value = if (gyroSmoothMs == 0) "OFF" else "$gyroSmoothMs ms",
+                    hint = "steadier hands, but this is lag you are adding",
+                    onDown = { onTune("gyroSmooth", -1) },
+                    onUp = { onTune("gyroSmooth", +1) },
+                )
                 // Tilt steering now reads gravity, not yaw: the gesture is a physical wheel rotation,
                 // not a flat turn of the phone. Spell that out — held flat there is no rotation to
                 // measure and steering deliberately parks at centre.
@@ -1094,9 +1245,36 @@ private fun OptionsSheet(
                 )
             } else {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("WHEEL RANGE", color = PitWall.TowerGray, fontSize = 10.sp, letterSpacing = 1.sp)
-                    ChipLabel("$wheelRangeDeg° (SENSITIVITY)", PitWall.WheelGlow, onCycleWheelRange)
+                    ChipLabel("$wheelRangeDeg° PRESET", PitWall.WheelGlow, onCycleWheelRange)
                 }
+                AdjustRow(
+                    label = "WHEEL RANGE",
+                    value = "$wheelRangeDeg°",
+                    hint = "lock to lock — lower is sharper",
+                    onDown = { onTune("wheelRange", -1) },
+                    onUp = { onTune("wheelRange", +1) },
+                )
+                AdjustRow(
+                    label = "RETURN TIME",
+                    value = "$returnMs ms",
+                    hint = "raise it until the truck follows the wheel home",
+                    onDown = { onTune("return", -1) },
+                    onUp = { onTune("return", +1) },
+                )
+                AdjustRow(
+                    label = "COUNTER-STEER",
+                    value = if (counterPct == 0) "OFF" else "$counterPct%",
+                    hint = "nudge past centre so the game unwinds fully",
+                    onDown = { onTune("counter", -1) },
+                    onUp = { onTune("counter", +1) },
+                )
+                Text(
+                    "If the truck holds its turn after you let go, the game is tracking the wheel more " +
+                        "slowly than the app: give it a longer RETURN TIME and a little COUNTER-STEER.",
+                    color = PitWall.TowerGray,
+                    fontSize = 9.sp,
+                    lineHeight = 12.sp,
+                )
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1113,6 +1291,68 @@ private fun OptionsSheet(
                 }
             }
         }
+    }
+}
+
+/**
+ * A labelled setting with − / + steppers. Used for every fine sensitivity adjuster.
+ *
+ * Steppers rather than a slider on purpose: this panel gets used with a thumb, often while the truck
+ * is rolling, and a slider gives no way to move exactly one increment or to know you did. Each button
+ * repeats while held, so crossing 20-40 levels is one press, not forty taps.
+ */
+@Composable
+private fun AdjustRow(
+    label: String,
+    value: String,
+    hint: String,
+    onDown: () -> Unit,
+    onUp: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(label, color = PitWall.TowerGray, fontSize = 10.sp, letterSpacing = 1.sp)
+            Text(hint, color = PitWall.PanelBorder, fontSize = 8.sp, lineHeight = 10.sp)
+        }
+        StepButton("–", onDown)
+        Box(Modifier.width(62.dp), contentAlignment = Alignment.Center) {
+            Text(value, color = PitWall.Ink, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+        }
+        StepButton("+", onUp)
+    }
+}
+
+@Composable
+private fun StepButton(glyph: String, onStep: () -> Unit) {
+    var down by remember { mutableStateOf(false) }
+    // pointerInput(Unit) captures its lambda once for the life of the node, so read the callback
+    // through rememberUpdatedState rather than closing over the one from this composition.
+    val step = rememberUpdatedState(onStep)
+    Box(
+        Modifier
+            .size(34.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(if (down) PitWall.Indigo else PitWall.Panel)
+            .border(1.dp, PitWall.PanelBorder, RoundedCornerShape(6.dp))
+            .semantics { contentDescription = "pad:STEP$glyph" }
+            .pointerInput(Unit) {
+                detectTapGestures(onPress = {
+                    down = true
+                    step.value()
+                    // null means still held at the boundary: start auto-repeating.
+                    if (withTimeoutOrNull(380) { tryAwaitRelease() } == null) {
+                        while (withTimeoutOrNull(85) { tryAwaitRelease() } == null) step.value()
+                    }
+                    down = false
+                })
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(glyph, color = if (down) PitWall.Ink else PitWall.ButtonLabel, fontSize = 16.sp, fontWeight = FontWeight.Bold)
     }
 }
 

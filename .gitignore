@@ -1,3 +1,12 @@
+# ---------------------------------------------------------------------------
+# EuroPad — what does NOT go to git.
+#
+# Deliberately TRACKED despite looking like artifacts (do not add these):
+#   build-and-deploy.ps1     the one supported build/deploy entry point (source, not output)
+#   EuroPad-Mobile.apk       install-now snapshot; REFRESH IT before you commit, see README
+#   EuroPad-Mobile.aab       Play-format snapshot of the same build
+# ---------------------------------------------------------------------------
+
 # .NET build artifacts
 bin/
 obj/
@@ -9,6 +18,7 @@ server-build/
 .vs/
 TestResults/
 *.nupkg
+*.received.*
 
 # Android / Gradle build outputs
 .gradle/
@@ -21,7 +31,13 @@ captures/
 .cxx/
 release/
 .kotlin/
-build-and-deploy.ps1
+*.hprof
+
+# Signing material — a leaked keystore cannot be un-leaked
+*.jks
+*.keystore
+keystore.properties
+key.properties
 
 # Kotlin / Java
 *.class
@@ -45,7 +61,8 @@ Desktop.ini
 .tempmediaStorage/
 docs/superpowers/
 
-# Working-state docs
+# Working-state docs — private notebooks, deliberately not published. Anything a
+# contributor (or future you, on a fresh clone) actually needs lives in README.md.
 TASKS.md
 TODO.md
 MEMORY.md
@@ -55,7 +72,11 @@ CONTINUE.md
 DESIGN.md
 PRODUCT.md
 
-# EuroPad runtime logs
+# EuroPad runtime logs and machine-local profiles
 *.log
 logs/
 profiles/local-*.json
+
+# Patch / merge leftovers
+*.orig
+*.rej

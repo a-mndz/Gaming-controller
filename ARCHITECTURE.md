@@ -208,10 +208,11 @@ Latency budget (verified targets): phone capture ~2ms, encode ~0.1ms, LAN hop 2�
 
 ## 10. Build & run
 
-- Server: `dotnet build server/EuroPad.Server.sln -c Release`; run `EuroPadServer.exe` (tray icon). Requires ViGEmBus 1.22.0 installed.
-- Phone: Android Studio → open `app/`; Run to device (or `./gradlew assembleDebug` + sideload APK).
+- **Both sides at once**: `.\build-and-deploy.ps1` from the repo root — tests + publishes the server, restarts it, tests + builds the APK, reinstalls and relaunches on the phone. It locates the JDK 17, Gradle 8.9 and adb itself, so nothing has to be on PATH.
+- Server: `dotnet build server/EuroPad.Server.sln -c Release`; run `server-bin\EuroPadServer.exe`. Requires ViGEmBus 1.22.0 installed.
+- Phone: Android Studio → open `app/`; Run to device. By hand there is **no committed Gradle wrapper**, so call the distribution by full path — see README.md → Building → By hand for the exact two lines.
 - Profiles: edit JSON in the profiles folder → server hot-reloads.
-- See README.md for first-run walkthrough.
+- See README.md for the first-run walkthrough, all file locations and the tuning adjusters.
 
 ## 11. Future / v2 (explicitly parked)
 

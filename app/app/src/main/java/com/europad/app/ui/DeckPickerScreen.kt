@@ -280,7 +280,9 @@ fun DeckPickerScreen() {
                             modifier = Modifier.weight(1f),
                         ) {
                             if (truckMode == "wheel") {
-                                val next = when (wheelRange) { 180 -> 270; 270 -> 360; 360 -> 540; 540 -> 900; else -> 180 }
+                                // Shared preset list: a hand-written cycle here would send a value the
+                                // deck's fine stepper produced (e.g. 460°) back to 180° on one tap.
+                                val next = nextWheelRange(wheelRange)
                                 wheelRange = next
                                 prefs.edit().putInt("wheelRange", next).apply()
                             } else {
@@ -295,7 +297,7 @@ fun DeckPickerScreen() {
                             modifier = Modifier.weight(1f),
                         ) {
                             if (truckMode == "gyro") {
-                                val next = when (gyroRange) { 90 -> 180; 180 -> 270; 270 -> 360; else -> 90 }
+                                val next = nextGyroRange(gyroRange)
                                 gyroRange = next
                                 prefs.edit().putInt("gyroRange", next).apply()
                             } else {

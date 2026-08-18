@@ -3,7 +3,9 @@ package com.europad.app.input
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.exp
 import kotlin.math.max
+import kotlin.math.pow
 import kotlin.math.sign
 import kotlin.math.sqrt
 
@@ -88,5 +90,36 @@ object GyroMath {
 
     fun complementaryStep(smooth: Float, measured: Float, alpha: Float): Float {
         return smooth + alpha.coerceIn(0f, 1f) * (measured - smooth)
+    }
+
+    /**
+     * EMA weight for a sample that arrived [dtMs] after the previous one, for a filter whose time
+     * constant is [tauMs].
+     *
+     * A fixed per-sample alpha silently changes meaning when the sample rate changes: alpha 0.35 is a
+     * 57 ms lag at 50 Hz and a 14 ms lag at 200 Hz. Since the sensor rate is now much faster (and is
+     * never exactly what you asked the driver for), the filters are specified as a *time* constant and
+     * the weight is derived from the real interval — the feel stays put whatever the device delivers.
+     */
+    fun emaAlpha(dtMs: Float, tauMs: Float): Float {
+        if (tauMs <= 0f) return 1f          // no smoothing: follow the measurement exactly
+        if (dtMs <= 0f) return 0f           // no time passed: nothing to blend
+        return (1f - exp(-dtMs / tauMs)).coerceIn(0f, 1f)
+    }
+
+    /**
+     * Precision curve for tilt steering. [curve] 0 is linear; 1 is very soft around centre.
+     *
+     * Lock-to-lock range alone cannot give both precise lane-keeping and full lock: widen the range
+     * and small corrections get precise but you run out of comfortable wrist travel, narrow it and the
+     * truck darts. Exponential shaping separates the two — `|out| = |in| ^ (1 + 2·curve)` keeps 0 at 0
+     * and ±1 at ±1 (so full lock is still reachable at the same tilt) while stretching the middle of
+     * the travel, which is where a driver spends almost all of their time.
+     */
+    fun applyCurve(steer: Float, curve: Float): Float {
+        val c = curve.coerceIn(0f, 1f)
+        if (c <= 0f) return steer.coerceIn(-1f, 1f)
+        val magnitude = abs(steer).coerceIn(0f, 1f)
+        return sign(steer) * magnitude.pow(1f + 2f * c)
     }
 }
