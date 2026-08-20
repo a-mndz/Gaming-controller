@@ -100,12 +100,12 @@ object LayoutEdit {
     )
 
     /**
-     * Resizes an element by its bottom-right corner: the top-left edge stays put, so [w]/[h] are
-     * clamped to at least [MIN_TOUCH_DP] and at most the room left on the canvas.
+     * Resizes an element down and to the right: the top-left edge stays put, so [w]/[h] are clamped
+     * to at least [MIN_TOUCH_DP] and at most the room left on the canvas.
      *
-     * [p] is the anchor — pass the geometry as it was when the corner drag *started*, not the live
-     * value, so the top-left edge is derived from a fixed point for the whole gesture. Deriving it
-     * fresh from a mid-gesture position lets rounding and dropped events walk the anchor across the
+     * [p] is the anchor — pass the geometry as it was when the resize *started*, not the live value,
+     * so the top-left edge is derived from a fixed point for the whole gesture. Deriving it fresh
+     * from a mid-gesture position lets rounding and dropped events walk the anchor across the
      * canvas. As with [moved], [w]/[h] are the caller's unclamped running total.
      *
      * @param canvasWDp inner canvas width in dp, @param canvasHDp inner canvas height in dp
@@ -120,6 +120,18 @@ object LayoutEdit {
         val newH = h.coerceIn(minH, 1f - top)
         return ElementPosition.create(p.id, left + newW / 2f, top + newH / 2f, newW, newH)
     }
+
+    /**
+     * Pinch resize: scales [p] by [factor] on both axes, through [resized] so a pinch and a pull
+     * clamp and anchor identically — the two gestures can never disagree about geometry.
+     *
+     * [p] is the size the pinch started from and [factor] is the live finger span divided by the span
+     * at that moment, recomputed from that fixed pair on every event rather than accumulated: a pinch
+     * that wanders out and comes back to where it began leaves the element exactly as it was, and a
+     * dropped event costs nothing because the next one is absolute.
+     */
+    fun scaled(p: ElementPosition, factor: Float, canvasWDp: Float, canvasHDp: Float): ElementPosition =
+        resized(p, p.w * factor, p.h * factor, canvasWDp, canvasHDp)
 
     /** True AABB intersection — matches the spec's overlap definition, no centre-distance fudge. */
     fun overlaps(a: DeckRect, b: DeckRect): Boolean =
@@ -145,19 +157,6 @@ object LayoutEdit {
     /** The editor's warning test: a real collision, not two controls sharing an edge. */
     fun collides(a: DeckRect, b: DeckRect): Boolean =
         overlapFraction(a, b) >= OVERLAP_WARN_FRACTION
-
-    /**
-     * How far past the element's bottom-right corner the resize grab box is pushed, so that a
-     * [grabDp]-wide box ends up *centred on the corner* — half of it outside the element.
-     *
-     * The grab box is a child of the drag box, so it wins hit-testing everywhere it covers: every
-     * dp of it that lies inside the element is a dp you cannot grab to move. Centring it is the
-     * most it can be pushed out while still being reachable from inside the element.
-     */
-    fun cornerGrabOutsetDp(grabDp: Float = MIN_TOUCH_DP): Float = grabDp / 2f
-
-    /** The side of the element's own interior that grab box eats. See [cornerGrabOutsetDp]. */
-    fun cornerGrabInsideDp(grabDp: Float = MIN_TOUCH_DP): Float = grabDp - cornerGrabOutsetDp(grabDp)
 }
 
 /**

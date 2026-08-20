@@ -19,8 +19,8 @@ import org.junit.Test
  * the control crawled behind the finger and lost most of the drag. The fix is to accumulate in the
  * pointer scope, and these tests describe the accumulator the UI is expected to implement.
  *
- * [dragged] and [cornerDragged] mirror `ElementHandle`'s gesture loops exactly, so if the UI ever
- * drifts back to per-event re-reads, the numbers here stop matching.
+ * [dragged], [pullResized] and [pinched] mirror `ElementHandle`'s gesture loops exactly, so if the UI
+ * ever drifts back to per-event re-reads, the numbers here stop matching.
  */
 class LayoutGestureTest {
 
@@ -43,8 +43,8 @@ class LayoutGestureTest {
         return out
     }
 
-    /** One corner gesture: [start] stays the anchor for every event, size accumulates. */
-    private fun cornerDragged(
+    /** One hold-then-pull resize: [start] stays the anchor for every event, size accumulates. */
+    private fun pullResized(
         start: ElementPosition,
         deltas: List<Pair<Float, Float>>,
     ): ElementPosition {
@@ -59,6 +59,17 @@ class LayoutGestureTest {
             liveH += dy
             out = LayoutEdit.resized(start, liveW, liveH, canvasW, canvasH)
         }
+        return out
+    }
+
+    /**
+     * One pinch: the size on screen when the second finger landed is the anchor, and each event is
+     * *absolute* — the live finger span over the span at that moment. Nothing accumulates.
+     */
+    private fun pinched(start: ElementPosition, startSpan: Float, spans: List<Float>): ElementPosition {
+        val shown = LayoutEdit.resized(start, start.w, start.h, canvasW, canvasH)
+        var out = shown
+        spans.forEach { span -> out = LayoutEdit.scaled(shown, span / startSpan, canvasW, canvasH) }
         return out
     }
 
@@ -100,12 +111,12 @@ class LayoutGestureTest {
         assertTrue("stale base must undershoot — that was the bug", stale.cx < accumulated.cx)
     }
 
-    /** Same guarantee for the corner: a stepped resize equals the one-shot resize. */
+    /** Same guarantee for a pull: a stepped resize equals the one-shot resize. */
     @Test
     fun `a resize split across many events lands where a single event would`() {
         val start = ElementPosition("ACCEL", cx = 0.50f, cy = 0.50f, w = 0.10f, h = 0.20f)
 
-        val stepped = cornerDragged(start, List(25) { 0.004f to 0.008f })
+        val stepped = pullResized(start, List(25) { 0.004f to 0.008f })
         val single = LayoutEdit.resized(start, start.w + 0.10f, start.h + 0.20f, canvasW, canvasH)
 
         assertEquals("width travel lost", single.w, stepped.w, 0.0001f)
@@ -129,16 +140,16 @@ class LayoutGestureTest {
         assertEquals(0.80f, returned.cx, 0.0001f)
     }
 
-    /** Same at the 44 dp floor: squash the corner flat, then grow, and it grows immediately. */
+    /** Same at the 44 dp floor: squash it flat, then grow, and it grows immediately. */
     @Test
     fun `shrinking to the touch floor and growing back does not lose travel`() {
         val start = ElementPosition("CAMERA", cx = 0.50f, cy = 0.50f, w = 0.20f, h = 0.30f)
 
-        val floored = cornerDragged(start, List(10) { -0.05f to -0.05f })
+        val floored = pullResized(start, List(10) { -0.05f to -0.05f })
         assertEquals("width floor", LayoutEdit.MIN_TOUCH_DP, floored.w * canvasW, 0.01f)
 
         // -0.50 then +0.55 leaves the accumulator 0.05 above the starting width.
-        val regrown = cornerDragged(
+        val regrown = pullResized(
             start,
             List(10) { -0.05f to -0.05f } + List(11) { 0.05f to 0.05f },
         )
@@ -147,10 +158,10 @@ class LayoutGestureTest {
     }
 
     // ========================================================================
-    // The corner anchors the top-left edge for the whole gesture
+    // Resizing anchors the top-left edge for the whole gesture
     // ========================================================================
 
-    /** Every intermediate frame of a corner drag keeps the top-left edge exactly where it was. */
+    /** Every intermediate frame of a pull keeps the top-left edge exactly where it was. */
     @Test
     fun `the resize anchor stays pinned for every event of a gesture`() {
         val start = ElementPosition("GEAR", cx = 0.50f, cy = 0.30f, w = 0.165f, h = 0.085f)
@@ -174,10 +185,10 @@ class LayoutGestureTest {
     }
 
     /**
-     * `GEAR` and `INDICATORS` ship shorter than the 44 dp floor, so the first corner event snaps
+     * `GEAR` and `INDICATORS` ship shorter than the 44 dp floor, so the first resize event snaps
      * them up to it. Seeding the accumulator from the raw stored height rather than the enforced one
      * left a dead zone: the next ~12 dp of drag was spent climbing back to a size already on screen,
-     * which reads as the handle ignoring you.
+     * which reads as the gesture ignoring you.
      */
     @Test
     fun `a control that starts below the touch floor grows on the first event`() {
@@ -185,7 +196,7 @@ class LayoutGestureTest {
         val floorH = LayoutEdit.MIN_TOUCH_DP / canvasH
         assertTrue("fixture must start below the floor to be worth testing", start.h < floorH)
 
-        val onePush = cornerDragged(start, listOf(0f to 0.02f))
+        val onePush = pullResized(start, listOf(0f to 0.02f))
 
         assertEquals("first event must move the bottom edge", floorH + 0.02f, onePush.h, 0.0001f)
         assertEquals("width must not drift", start.w, onePush.w, 0.0001f)
@@ -203,32 +214,55 @@ class LayoutGestureTest {
     }
 
     // ========================================================================
-    // The resize corner must not eat the move target
+    // Pinch: absolute, uniform, and anchored the same way a pull is
     // ========================================================================
 
     /**
-     * The grab box for the resize corner is a child of the drag box, so it wins hit-testing wherever
-     * it covers it: every dp of it inside the element is a dp you cannot grab to move. It used to be
-     * offset by `(44 - 22) / 2` = 11 dp, which centres nothing — the 44 dp box straddled 33 dp of the
-     * element and claimed the whole bottom-right of a utility button, so most grabs started a resize
-     * instead of a move. Centred on the corner it claims a quarter of the smallest element the editor
-     * allows, and less of anything bigger.
+     * A pinch is computed from the span the second finger landed at, not accumulated per event, so a
+     * pinch that wanders and comes back leaves the control exactly as it was. An accumulator here
+     * would drift with every dropped event and every clamp it hit on the way.
      */
     @Test
-    fun `the resize corner claims at most a quarter of the smallest element`() {
-        val grab = LayoutEdit.MIN_TOUCH_DP
-        val inside = LayoutEdit.cornerGrabInsideDp()
+    fun `a pinch that returns to its starting span leaves the size untouched`() {
+        val start = ElementPosition("WHEEL", cx = 0.20f, cy = 0.65f, w = 0.27f, h = 0.50f)
 
-        assertEquals("the box has to reach the corner from inside", grab, inside + LayoutEdit.cornerGrabOutsetDp(), 0.0001f)
+        val out = pinched(start, startSpan = 240f, spans = listOf(300f, 420f, 180f, 90f, 240f))
 
-        // Worst case: an element squashed onto the 44 dp floor in both directions.
-        val claimed = (inside * inside) / (grab * grab)
-        assertTrue("corner claims $claimed of a floor-sized element", claimed <= 0.25f)
+        assertEquals(start.w, out.w, 0.0001f)
+        assertEquals(start.h, out.h, 0.0001f)
+        assertEquals(start.cx, out.cx, 0.0001f)
+        assertEquals(start.cy, out.cy, 0.0001f)
+    }
 
-        // A stock utility button on a 1080x2400 handset: 849x369 dp inner canvas.
-        val btn = DeckLayout.utilBtn(0, 849f / 369f)
-        val onButton = (inside * inside) / (btn.w * 849f * btn.h * 369f)
-        assertTrue("corner claims $onButton of a utility button", onButton <= 0.20f)
+    /** Spreading the fingers to twice the span doubles both sides and pins the top-left edge. */
+    @Test
+    fun `pinching out scales both axes from the same anchor a pull uses`() {
+        val start = ElementPosition("CAMERA", cx = 0.30f, cy = 0.40f, w = 0.10f, h = 0.20f)
+        val left = start.cx - start.w / 2f
+        val top = start.cy - start.h / 2f
+
+        val out = pinched(start, startSpan = 100f, spans = listOf(140f, 200f))
+
+        assertEquals(0.20f, out.w, 0.0001f)
+        assertEquals(0.40f, out.h, 0.0001f)
+        assertEquals("left edge drifted", left, out.cx - out.w / 2f, 0.0005f)
+        assertEquals("top edge drifted", top, out.cy - out.h / 2f, 0.0005f)
+    }
+
+    /** The 44 dp floor holds against a pinch too, and reopening from it is honoured in full. */
+    @Test
+    fun `a pinch cannot shrink a control below the touch floor`() {
+        val start = ElementPosition("LIGHTS", cx = 0.10f, cy = 0.12f, w = 0.09f, h = 0.20f)
+
+        val shut = pinched(start, startSpan = 200f, spans = listOf(80f, 20f))
+        assertEquals("width floor", LayoutEdit.MIN_TOUCH_DP, shut.w * canvasW, 0.01f)
+        assertEquals("height floor", LayoutEdit.MIN_TOUCH_DP, shut.h * canvasH, 0.01f)
+
+        // Absolute, not accumulated: back out to twice the opening span is twice the opening size,
+        // whatever the floor did in between.
+        val reopened = pinched(start, startSpan = 200f, spans = listOf(80f, 20f, 400f))
+        assertEquals(start.w * 2f, reopened.w, 0.0001f)
+        assertEquals(start.h * 2f, reopened.h, 0.0001f)
     }
 
     // ========================================================================

@@ -6,7 +6,6 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,7 +13,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -25,16 +23,18 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Constraints
@@ -165,21 +165,6 @@ fun LayoutEditOverlay(
             )
         }
 
-        // The resize grab is a sibling of the handles, not a child of the selected one. See
-        // [ResizeGrab] — as a child it was unreachable for most of its own visible area.
-        val sel = selected
-        if (sel != null && sel in ids) {
-            ResizeGrab(
-                id = sel,
-                position = { positionOf(sel) },
-                pad = pad,
-                innerW = innerW,
-                innerH = innerH,
-                onSelect = { selected = sel },
-                onChange = { onChange(sel, it) },
-            )
-        }
-
         Row(
             Modifier
                 // Above every unselected handle, below the selected one (zIndex 3): a control the
@@ -202,7 +187,7 @@ fun LayoutEditOverlay(
                     letterSpacing = 1.sp,
                 )
                 Text(
-                    "Drag to move · corner to resize · tap empty space to deselect",
+                    "Drag to move · pinch or hold-then-pull to resize · tap empty space to deselect",
                     color = PitWall.ButtonLabel,
                     fontSize = 9.sp,
                 )
@@ -233,41 +218,25 @@ fun LayoutEditOverlay(
     }
 }
 
-/** Visible corner tab. */
-private val HANDLE_SIZE = 22.dp
+/** How a press on a control is being read. Decided once per gesture, then only MOVE may change. */
+private enum class EditGesture { RELEASED, MOVE, PULL, PINCH }
 
 /**
- * Grab area for the corner tab, centred on the element's bottom-right corner. The tab used to *be*
- * the target: a 22 dp square wholly inside the element, half the app's own touch floor
- * ([LayoutEdit.MIN_TOUCH_DP]) on the one control you have to hit precisely. Missing it started a
- * move instead of a resize, which is what "resizing doesn't work" looks like from the outside.
- */
-private val HANDLE_HIT = LayoutEdit.MIN_TOUCH_DP.dp
-
-/**
- * Half the grab box, which is also the distance its centre sits from the element's corner: the box
- * straddles the corner, so it claims a 22 dp square of the element and reaches 22 dp into open
- * canvas.
- *
- * This was `(HANDLE_HIT - HANDLE_SIZE) / 2` — 11 dp, which is not the offset that centres anything;
- * it left the 44 dp box straddling 33 dp of the element's own body. The grab wins hit-testing over
- * the drag box, so on a utility button (~55×48 dp on a 1080p handset) that claimed the whole
- * bottom-right 41% of the control and every grab that landed there resized instead of moving. What
- * was left to move by was a 22 dp strip — half the app's own touch floor.
- */
-private val HANDLE_OUT = LayoutEdit.cornerGrabOutsetDp(LayoutEdit.MIN_TOUCH_DP).dp
-
-/**
- * One element's drag box. The resize grab is [ResizeGrab], a sibling — it cannot live in here.
+ * One element's edit handle — the whole gesture surface for that control, move *and* resize.
  * Geometry comes from [placeOnDeck], so this is the same rectangle the deck draws the control in.
  *
+ * There is no corner tab any more. It was a 44 dp box centred on the bottom-right corner: the one
+ * spot you had to hit precisely, and the only way to resize anything. Resize now starts anywhere on
+ * the control — pinch it with two fingers, or hold still until it ticks and then pull. The size
+ * readout is gone with it; the control changing shape under the finger says the same thing.
+ *
  * Nothing here reads a position during composition. [position] and [overlaps] are read in the layout
- * and draw phases, so a drag re-measures and repaints this one handle and recomposes nothing at all —
- * the live size readout is its own composable for exactly that reason. The drag also accumulates its
- * own running total inside the pointer scope rather than re-reading the committed position on each
- * event: a position only refreshes between frames, so several `onDrag` callbacks in a row used to see
- * the same base and the last write won — the element crawled behind the finger and lost most of the
- * travel. A plain local `var` is immune to that: every delta lands exactly once.
+ * and draw phases, so a gesture re-measures and repaints this one handle and recomposes nothing at
+ * all. The gesture also accumulates its own running total inside the pointer scope rather than
+ * re-reading the committed position on each event: a position only refreshes between frames, so
+ * several callbacks in a row used to see the same base and the last write won — the element crawled
+ * behind the finger and lost most of the travel. A plain local `var` is immune to that: every delta
+ * lands exactly once.
  */
 @Composable
 private fun ElementHandle(
@@ -290,8 +259,11 @@ private fun ElementHandle(
     val emit by rememberUpdatedState(onChange)
     val select by rememberUpdatedState(onSelect)
     val density = LocalDensity.current.density
-    // Read through state rather than added as pointerInput keys, which would tear down the drag
-    // detector mid-gesture on a rotation.
+    // The one cue that a hold became a resize, now that the editor draws no marks at all: the tick
+    // Android gives every long press.
+    val haptics = LocalHapticFeedback.current
+    // Read through state rather than added as pointerInput keys, which would tear down the gesture
+    // node mid-gesture on a rotation.
     val canvasWDp by rememberUpdatedState(innerW.value)
     val canvasHDp by rememberUpdatedState(innerH.value)
 
@@ -318,21 +290,20 @@ private fun ElementHandle(
                     )
                 }
             }
-            // Select on press, not on tap, and move on the same gesture — one node owns both. A tap
-            // detector cannot survive in here: it confirms on the Final pass and abandons the gesture
-            // if anything consumed it, and something always does — see the note on the overlay's root.
-            // Pressing also reads better than tapping: the control is selected the moment you touch
-            // it, so the corner handle is already there when the finger that selected it lets go.
+            // Select on press, not on tap, and run the whole gesture here — one node owns select,
+            // move, and both resizes. A tap detector cannot survive in here: it confirms on the Final
+            // pass and abandons the gesture if anything consumed it, and something always does — see
+            // the note on the overlay's root.
             //
-            // Select and drag were two `pointerInput` nodes in this chain before. The press-consumer
+            // Select and drag were two `pointerInput` nodes in this chain once. The press-consumer
             // ran, the drag detector never started a single coroutine — proven on device: its first
             // line never logged while both of its neighbours logged every event. Two nodes splitting
             // one gesture in one chain is the bug; one node that awaits its own events has nothing to
-            // race. No slop threshold either: inside the editor the only thing a press on a control
-            // can mean is "move me", so the first movement moves it.
+            // race. That is also why resize lives in here now instead of in a tab of its own.
             //
-            // Consuming the whole gesture keeps the real control underneath silent.
-            .pointerInput("drag-$id") {
+            // Consuming every change keeps the real control underneath silent, and keeps the overlay
+            // root from deselecting us — it drops the selection on any press nobody claimed.
+            .pointerInput("edit-$id") {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     down.consume()
@@ -340,147 +311,110 @@ private fun ElementHandle(
                     val base = pos()
                     var liveCx = base.cx
                     var liveCy = base.cy
-                    // Unclamped running total on purpose: clamping the accumulator would make an edge
-                    // swallow overshoot and stick.
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                        if (change.changedToUpIgnoreConsumed()) {
-                            change.consume()
-                            break
+
+                    // What did this press mean? Movement past the slop is a move, a second finger is
+                    // a pinch, and a finger that just stays put until the long-press timeout is a
+                    // pull resize. Sub-slop deltas are banked into the move accumulator rather than
+                    // dropped, so a move that starts slowly still lands its first millimetre.
+                    var mode = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                        var travel = 0f
+                        var decided = EditGesture.RELEASED
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id }
+                            // `positionChange()` reports Offset.Zero once the change is consumed, so
+                            // the delta has to be read *before* consuming. Inverting these two lines
+                            // silently kills every gesture in the editor: travel stays zero, the slop
+                            // is never crossed, and every press decays into a long press.
+                            val drag = change?.positionChange() ?: Offset.Zero
+                            val fingers = event.changes.count { it.pressed }
+                            event.changes.forEach { it.consume() }
+                            if (change == null || change.changedToUpIgnoreConsumed()) break
+                            if (fingers > 1) {
+                                decided = EditGesture.PINCH
+                                break
+                            }
+                            travel += drag.getDistance()
+                            liveCx += (drag.x / density) / canvasWDp
+                            liveCy += (drag.y / density) / canvasHDp
+                            if (travel > viewConfiguration.touchSlop) {
+                                decided = EditGesture.MOVE
+                                break
+                            }
                         }
-                        val drag = change.positionChange()
-                        change.consume()
-                        if (drag == Offset.Zero) continue
-                        liveCx += (drag.x / density) / canvasWDp
-                        liveCy += (drag.y / density) / canvasHDp
-                        emit(LayoutEdit.moved(base, liveCx, liveCy))
+                        decided
+                    } ?: EditGesture.PULL
+                    if (mode == EditGesture.RELEASED) return@awaitEachGesture
+                    // The travel banked while deciding, so a move starts from the finger, not from
+                    // where it first landed.
+                    if (mode == EditGesture.MOVE) emit(LayoutEdit.moved(base, liveCx, liveCy))
+                    if (mode == EditGesture.PULL) {
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                     }
-                }
-            },
-    ) {
-        if (isSelected) SizeReadout(id, pos, innerW, innerH)
-    }
-}
 
-/**
- * The resize grab for the selected element: a 44 dp target centred on its bottom-right corner.
- *
- * A sibling of the handles rather than a child of the selected one, and that is the entire fix. Once
- * the box is centred on the corner, half of it — including the centre of the visible tab, which sits
- * exactly *on* that corner — lies outside the element it belongs to. A child reaching past its
- * parent's bounds is not an ordinary hit in Compose: the parent is out of bounds for that press, so
- * the press is only offered to the child as a near miss. Aiming at the middle of the tab therefore
- * missed, fell through to the overlay root, and the root deselects any press nobody claimed — which
- * deleted the tab mid-press. "The handle appears, dragging it does nothing" is that, exactly.
- *
- * Out here every pixel of it is a plain in-bounds hit of the full-screen overlay, whatever the
- * element's size, and zIndex 4 keeps it above the toolbar and above every handle including the
- * selected one. It also can no longer be confused with a move: the element's drag box is not an
- * ancestor of this node, so the two gestures never see the same pointer.
- *
- * [position] is read in the layout phase only, like [placeOnDeck]: a resize writes a new size on
- * every pointer event and must not recompose anything.
- */
-@Composable
-private fun ResizeGrab(
-    id: String,
-    position: () -> ElementPosition,
-    pad: Dp,
-    innerW: Dp,
-    innerH: Dp,
-    onSelect: () -> Unit,
-    onChange: (ElementPosition) -> Unit,
-) {
-    val pos by rememberUpdatedState(position)
-    val emit by rememberUpdatedState(onChange)
-    val select by rememberUpdatedState(onSelect)
-    val density = LocalDensity.current.density
-    val canvasWDp by rememberUpdatedState(innerW.value)
-    val canvasHDp by rememberUpdatedState(innerH.value)
-
-    Box(
-        Modifier
-            .zIndex(4f)
-            .offset {
-                val r = pos().toDeckRect()
-                IntOffset(
-                    (pad.toPx() + innerW.toPx() * r.right - HANDLE_OUT.toPx()).roundToInt(),
-                    (pad.toPx() + innerH.toPx() * r.bottom - HANDLE_OUT.toPx()).roundToInt(),
-                )
-            }
-            .size(HANDLE_HIT)
-            // One node owns press-select and the resize drag, for the same reason the handle does:
-            // splitting them across two `pointerInput` nodes in one chain leaves the second one dead.
-            // It has to claim the press because the overlay root deselects any press no descendant
-            // consumed, and losing the selection is what removes this box from the tree.
-            .pointerInput("grab-$id") {
-                awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
-                    down.consume()
-                    select()
-                    // Snapshot at drag start and never re-read: `base` is both the fixed top-left
-                    // anchor for the whole gesture and the seed for the running size. Seed from the
-                    // size actually on screen, not the stored one — GEAR and INDICATORS are shorter
-                    // than the 44 dp floor, so seeding raw left the accumulator below what the first
-                    // event snapped to and the next ~12 dp of drag did nothing.
-                    val base = pos()
-                    val shown = LayoutEdit.resized(base, base.w, base.h, canvasWDp, canvasHDp)
+                    // Resize anchor: fixed for the rest of the gesture, and seeded from the size
+                    // actually on screen rather than the stored one — GEAR and INDICATORS ship
+                    // shorter than the 44 dp floor, so seeding raw leaves the accumulator below what
+                    // the first event snaps to, and the next ~12 dp of pull does nothing.
+                    var anchor = pos()
+                    var shown = LayoutEdit.resized(anchor, anchor.w, anchor.h, canvasWDp, canvasHDp)
+                    // Unclamped running totals on purpose: clamping an accumulator lets an edge or
+                    // the touch floor swallow overshoot and stick.
                     var liveW = shown.w
                     var liveH = shown.h
+                    var pinchSpan = 0f
+                    var pinchOther: PointerId? = null
                     while (true) {
                         val event = awaitPointerEvent()
-                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                        if (change.changedToUpIgnoreConsumed()) {
-                            change.consume()
-                            break
+                        val change = event.changes.firstOrNull { it.id == down.id }
+                        // Delta before consume, as in phase 1. `position` is untouched by consuming,
+                        // so the pinch span below can still be measured after the fact.
+                        val drag = change?.positionChange() ?: Offset.Zero
+                        val fingers = event.changes.count { it.pressed }
+                        event.changes.forEach { it.consume() }
+                        if (change == null || change.changedToUpIgnoreConsumed()) break
+                        // A second finger turns a move into a pinch mid-gesture. Only pointers that
+                        // landed on this control reach this node, so it is never someone else's.
+                        if (mode == EditGesture.MOVE && fingers > 1) {
+                            mode = EditGesture.PINCH
                         }
-                        val drag = change.positionChange()
-                        change.consume()
+
+                        if (mode == EditGesture.PINCH) {
+                            val other = if (pinchOther == null) {
+                                event.changes.firstOrNull { it.id != down.id && it.pressed }
+                            } else {
+                                event.changes.firstOrNull { it.id == pinchOther }
+                            }
+                            // Lost the second finger: end here rather than snap to a new span.
+                            if (other == null || !other.pressed) break
+                            val span = (change.position - other.position).getDistance()
+                            if (pinchOther == null) {
+                                if (span < 1f) break
+                                pinchOther = other.id
+                                pinchSpan = span
+                                // Re-anchor: a pinch that follows a move has to start from where the
+                                // move left the control, not from where the finger first landed.
+                                anchor = pos()
+                                shown = LayoutEdit.resized(anchor, anchor.w, anchor.h, canvasWDp, canvasHDp)
+                                continue
+                            }
+                            emit(LayoutEdit.scaled(shown, span / pinchSpan, canvasWDp, canvasHDp))
+                            continue
+                        }
+
                         if (drag == Offset.Zero) continue
-                        liveW += (drag.x / density) / canvasWDp
-                        liveH += (drag.y / density) / canvasHDp
-                        emit(LayoutEdit.resized(base, liveW, liveH, canvasWDp, canvasHDp))
+                        if (mode == EditGesture.MOVE) {
+                            liveCx += (drag.x / density) / canvasWDp
+                            liveCy += (drag.y / density) / canvasHDp
+                            emit(LayoutEdit.moved(base, liveCx, liveCy))
+                        } else {
+                            liveW += (drag.x / density) / canvasWDp
+                            liveH += (drag.y / density) / canvasHDp
+                            emit(LayoutEdit.resized(anchor, liveW, liveH, canvasWDp, canvasHDp))
+                        }
                     }
                 }
             },
-        contentAlignment = Alignment.Center,
-    ) {
-        Box(
-            Modifier
-                .size(HANDLE_SIZE)
-                .clip(RoundedCornerShape(50))
-                .background(PitWall.WheelGlow.copy(alpha = 0.85f)),
-            contentAlignment = Alignment.Center,
-        ) { Text("⤡", color = PitWall.Ink, fontSize = 12.sp) }
-    }
-}
-
-/**
- * Live size in dp, so the 44 dp floor is something you can see yourself hit.
- *
- * Its own composable because it is the one thing in the editor that genuinely has to read the
- * position during composition. Keeping it in here means a drag recomposes this label and nothing
- * else — inline in [ElementHandle] it dragged the whole handle, its outline and its corner along
- * with it, once per pointer event.
- */
-@Composable
-private fun BoxScope.SizeReadout(id: String, position: () -> ElementPosition, innerW: Dp, innerH: Dp) {
-    val p = position()
-    Text(
-        "$id  ${(innerW.value * p.w).toInt()}×${(innerH.value * p.h).toInt()}",
-        color = PitWall.Ink,
-        fontSize = 9.sp,
-        fontWeight = FontWeight.Bold,
-        // A utility button is only ~56 dp wide; without this the readout wraps to three lines and
-        // the box clips it.
-        maxLines = 1,
-        softWrap = false,
-        modifier = Modifier
-            .align(Alignment.TopStart)
-            .padding(3.dp)
-            .background(PitWall.Panel.copy(alpha = 0.75f), RoundedCornerShape(3.dp))
-            .padding(horizontal = 3.dp, vertical = 1.dp),
     )
 }
 
@@ -553,7 +487,8 @@ private fun FirstTimeInstructionsDialog(
                 )
                 InstructionItem("Tap a control to select it")
                 InstructionItem("Drag it anywhere on the deck")
-                InstructionItem("Drag the corner handle to resize (44 dp minimum)")
+                InstructionItem("Pinch it with two fingers to resize (44 dp minimum)")
+                InstructionItem("Or hold it still until it buzzes, then pull to resize")
                 InstructionItem("Tap empty space to deselect — do this if a control covers the buttons below")
                 InstructionItem("A red tint means it overlaps another control")
                 InstructionItem("SAVE applies it to the deck straight away")
