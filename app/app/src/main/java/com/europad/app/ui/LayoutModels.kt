@@ -77,7 +77,20 @@ object LayoutEdit {
     /** Accessibility floor for an interactive element (Requirement 9.2). */
     const val MIN_TOUCH_DP = 44f
 
-    /** Moves an element to [cx]/[cy], clamped so it stays fully inside the canvas. */
+    /**
+     * A meaningful overlap: this much of the smaller element has to be covered before the editor
+     * complains. A bare AABB touch is not worth a warning — several stock controls sit edge to edge
+     * on a 16:9-ish inner canvas, and flagging those painted the whole deck red on open.
+     */
+    const val OVERLAP_WARN_FRACTION = 0.25f
+
+    /**
+     * Moves an element to [cx]/[cy], clamped so it stays fully inside the canvas.
+     *
+     * [cx]/[cy] are the caller's *unclamped* running total for the gesture. Clamping only the result
+     * — never the accumulator — is what stops an edge from eating travel: overshoot the right edge by
+     * 0.2 and drag back 0.3 and you end up 0.1 left of where you hit the edge, not 0.3 left of it.
+     */
     fun moved(p: ElementPosition, cx: Float, cy: Float): ElementPosition = ElementPosition.create(
         id = p.id,
         cx = cx.coerceIn(p.w / 2f, 1f - p.w / 2f),
@@ -89,6 +102,11 @@ object LayoutEdit {
     /**
      * Resizes an element by its bottom-right corner: the top-left edge stays put, so [w]/[h] are
      * clamped to at least [MIN_TOUCH_DP] and at most the room left on the canvas.
+     *
+     * [p] is the anchor — pass the geometry as it was when the corner drag *started*, not the live
+     * value, so the top-left edge is derived from a fixed point for the whole gesture. Deriving it
+     * fresh from a mid-gesture position lets rounding and dropped events walk the anchor across the
+     * canvas. As with [moved], [w]/[h] are the caller's unclamped running total.
      *
      * @param canvasWDp inner canvas width in dp, @param canvasHDp inner canvas height in dp
      */
@@ -106,44 +124,27 @@ object LayoutEdit {
     /** True AABB intersection — matches the spec's overlap definition, no centre-distance fudge. */
     fun overlaps(a: DeckRect, b: DeckRect): Boolean =
         !(a.right <= b.left || a.left >= b.right || a.bottom <= b.top || a.top >= b.bottom)
-}
 
-/**
- * Identifies all supported control elements that can be repositioned.
- */
-enum class ElementId(val displayName: String) {
-    LIGHTS("Lights"),
-    WIPER("Wiper"),
-    VIPER("Windshield Washer"),
-    HANDBRAKE("Handbrake"),
-    SETTINGS("Settings"),
-    MENU("Menu"),
-    CAMERA("Camera"),
-    GEAR("Gear Selector"),
-    INDICATORS("Turn Signals"),
-    WHEEL("Steering Wheel"),
-    ACCEL("Accelerator"),
-    BRAKE("Brake"),
-    GYRO_ACCEL("Gyro Accelerator"),
-    GYRO_BRAKE("Gyro Brake");
-
-    companion object {
-        /**
-         * All elements that exist in wheel/touch mode.
-         */
-        val wheelModeElements = listOf(
-            LIGHTS, WIPER, VIPER, HANDBRAKE, SETTINGS, MENU, CAMERA,
-            GEAR, INDICATORS, WHEEL, ACCEL, BRAKE
-        )
-
-        /**
-         * All elements that exist in gyro mode (no wheel, gyro-specific pedals).
-         */
-        val gyroModeElements = listOf(
-            LIGHTS, WIPER, VIPER, HANDBRAKE, SETTINGS, MENU, CAMERA,
-            GEAR, INDICATORS, GYRO_ACCEL, GYRO_BRAKE
-        )
+    /** Area the two rects share, in units of canvas area. 0 when they only touch or miss. */
+    fun overlapArea(a: DeckRect, b: DeckRect): Float {
+        val w = minOf(a.right, b.right) - maxOf(a.left, b.left)
+        val h = minOf(a.bottom, b.bottom) - maxOf(a.top, b.top)
+        return if (w <= 0f || h <= 0f) 0f else w * h
     }
+
+    /**
+     * How much of the *smaller* of the two elements the other one covers, 0..1. Measured against the
+     * smaller so a big control laid over a little one reads as a full collision rather than a few
+     * percent of the big one's area.
+     */
+    fun overlapFraction(a: DeckRect, b: DeckRect): Float {
+        val smaller = minOf(a.w * a.h, b.w * b.h)
+        return if (smaller <= 0f) 0f else overlapArea(a, b) / smaller
+    }
+
+    /** The editor's warning test: a real collision, not two controls sharing an edge. */
+    fun collides(a: DeckRect, b: DeckRect): Boolean =
+        overlapFraction(a, b) >= OVERLAP_WARN_FRACTION
 }
 
 /**

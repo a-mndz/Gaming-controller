@@ -100,7 +100,7 @@ All three feed the **same** server pipeline. Transport picking is a UI choice on
 | End-to-end input latency (UDP/Wi-Fi 5 GHz) | ≤ 10 ms median | phone injects timestamp; server echoes RTT |
 | End-to-end latency (USB) | ≤ 5 ms median | same |
 | Input send rate (racing/gyro/aim/flight decks) | 240 Hz (D-007) | counters in HUD |
-| Failsafe trigger time | ≤ 300 ms after last packet | server log + on-screen |
+| Failsafe trigger time | ≤ 800 ms after last packet (`Proto.FailsafeMs`) | server log + on-screen |
 | Packet loss impact | zero visible hitch at 5% loss on LAN | synthetic loss test |
 | Steam recognition | virtual pad shows in Steam controller settings, works in-game with no per-game config | manual checklist |
 | Multi-device | 4 phones connected → 4 distinct XInput pads, independent input + rumble per phone | joy.cpl shows 4 devices; per-slot input test |

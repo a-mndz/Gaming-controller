@@ -22,7 +22,7 @@ public class ProfileTests
             Assert.Equal("Ctrl", active.Keys["GEAR_DN"]);
 
             var bits = mgr.ActiveKeysByBit;
-            Assert.Equal((byte)'[', bits[0]);
+            Assert.Equal(0xDB, bits[0]);
             Assert.Equal(0x20, bits[5]);
             Assert.Equal(0x10, bits[14]);
             Assert.Equal(0x11, bits[15]);
@@ -45,6 +45,37 @@ public class ProfileTests
         Assert.True(VkLookup.TryGet("F12", out var f12));
         Assert.Equal(0x7B, f12);
         Assert.False(VkLookup.TryGet("NotAKey", out _));
+    }
+
+    [Theory]
+    [InlineData("[", 0xDB)]   // VK_OEM_4 — was 0x5B = VK_LWIN, so the left indicator opened Start
+    [InlineData("]", 0xDD)]   // VK_OEM_6 — was 0x5D = VK_APPS
+    [InlineData(";", 0xBA)]
+    [InlineData("'", 0xDE)]
+    [InlineData(",", 0xBC)]
+    [InlineData(".", 0xBE)]
+    [InlineData("/", 0xBF)]
+    [InlineData("`", 0xC0)]
+    [InlineData("-", 0xBD)]
+    [InlineData("=", 0xBB)]
+    [InlineData("\\", 0xDC)]
+    public void VkLookup_PunctuationResolvesToOemVk(string key, byte expected)
+    {
+        Assert.True(VkLookup.TryGet(key, out var vk));
+        Assert.Equal(expected, vk);
+    }
+
+    [Theory]
+    [InlineData("{")]   // shifted symbols need Shift + OEM_4; a single VK cannot express them
+    [InlineData("!")]   // (byte)'!' is 0x21 = VK_PRIOR (PageUp)
+    [InlineData("+")]
+    [InlineData("@")]
+    public void VkLookup_RejectsSymbolsItCannotPress(string key)
+    {
+        // Coercing these to (byte)key[0] is what shipped VK_LWIN as an indicator, so an unknown
+        // symbol must fail the lookup and be refused by SetBitKey rather than press something else.
+        Assert.False(VkLookup.TryGet(key, out var vk));
+        Assert.Equal(0, vk);
     }
 
     [Fact]

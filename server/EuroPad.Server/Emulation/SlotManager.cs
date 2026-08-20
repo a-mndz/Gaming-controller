@@ -39,8 +39,6 @@ public sealed class SlotManager
     private readonly ViGEmClient _client;
     private readonly object _gate = new();
     private readonly SlotState?[] _slots = new SlotState?[Proto.MaxSlots];
-    private readonly Dictionary<string, long> _pinLockouts = new();
-    private readonly Dictionary<string, int> _pinFailCounts = new();
 
     public SlotManager(ViGEmClient client) => _client = client;
 
@@ -106,37 +104,6 @@ public sealed class SlotManager
         }
     }
 
-    public bool IsPinLocked(EndPoint remote, long now)
-    {
-        lock (_gate)
-        {
-            var key = IpKey(remote);
-            return _pinLockouts.TryGetValue(key, out var until) && now < until;
-        }
-    }
-
-    public void RecordPinFail(EndPoint remote, long now)
-    {
-        lock (_gate)
-        {
-            var key = IpKey(remote);
-            _pinFailCounts[key] = _pinFailCounts.GetValueOrDefault(key) + 1;
-            if (_pinFailCounts[key] >= 3)
-            {
-                _pinLockouts[key] = now + 60_000;
-                _pinFailCounts.Remove(key);
-            }
-        }
-    }
-
-    public void ClearPinFails(EndPoint remote)
-    {
-        lock (_gate) { _pinFailCounts.Remove(IpKey(remote)); }
-    }
-
-    private static string IpKey(EndPoint remote) =>
-        remote is IPEndPoint ip ? ip.Address.ToString() : remote.ToString()!;
-
     public void Free(SlotState s)
     {
         lock (_gate)
@@ -145,5 +112,13 @@ public sealed class SlotManager
         }
     }
 
-    public SlotState? ByIndex(int i) => _slots[i];
+    /// <summary>
+    /// Under the same lock as <see cref="Allocate"/> and <see cref="Free"/>: the housekeeping loop
+    /// walks every index each tick, and an unsynchronised read has no barrier against a slot that was
+    /// freed or allocated on the receive thread a moment ago.
+    /// </summary>
+    public SlotState? ByIndex(int i)
+    {
+        lock (_gate) { return _slots[i]; }
+    }
 }

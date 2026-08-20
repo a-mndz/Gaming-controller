@@ -18,13 +18,13 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -182,6 +182,7 @@ fun TruckDeck2(
     var rtt by remember { mutableLongStateOf(-1L) }
     var loss by remember { mutableIntStateOf(0) }
     var reconnecting by remember { mutableStateOf(false) }
+    var linkState by remember { mutableStateOf(transport.state) }
     // Bindings the phone saved but has not yet managed to push over a live link.
     var pendingKeys by remember { mutableStateOf(emptySet<String>()) }
     var sentKeys by remember { mutableStateOf(emptySet<String>()) }
@@ -190,6 +191,7 @@ fun TruckDeck2(
         while (true) {
             rtt = transport.rtt
             loss = transport.lossPercent
+            linkState = transport.state
             reconnecting = transport.state == ConnState.Reconnecting
             // A one-shot remap frame is lost for good if it left during a Wi-Fi stall or with no
             // slot assigned, and nothing ever re-pushed it — the phone showed the new key while the
@@ -381,6 +383,7 @@ fun TruckDeck2(
             m["CAMERA"] = DeckLayout.camera(aspect)
             m["GEAR"] = DeckLayout.gearSel()
             m["INDICATORS"] = DeckLayout.arrows()
+            m["LINK"] = DeckLayout.linkStrip()
             if (mode == "gyro") {
                 m["GYRO_ACCEL"] = DeckLayout.gyroAccel()
                 m["GYRO_BRAKE"] = DeckLayout.gyroBrake()
@@ -399,18 +402,19 @@ fun TruckDeck2(
         // null = nothing edited yet, so entering the editor shows the saved layout on the first
         // frame and RESET/CANCEL is just "forget the edits".
         var editPositions by remember { mutableStateOf<Map<String, ElementPosition>?>(null) }
-        val livePositions = editPositions ?: editBaseline
+        // Mirrors `editPositions != null`. It exists so nothing reads `editPositions` itself during
+        // composition: a drag writes that state on every pointer event, and one composition-time
+        // reader is enough to drag the whole deck through a recomposition each time.
+        var hasEdits by remember { mutableStateOf(false) }
+        // Read in the layout and draw phases only — see placeOnDeck.
+        val live = { editPositions ?: editBaseline }
 
         /** Editing shows the in-progress map, so the live deck moves with the handles. */
-        fun place(id: String, default: DeckRect): Modifier {
-            val r = when {
-                showEditLayout -> livePositions[id]?.toDeckRect() ?: default
-                else -> customPositions?.get(id)?.toDeckRect() ?: default
+        fun place(id: String, default: DeckRect): Modifier =
+            Modifier.placeOnDeck(pad, innerW, innerH) {
+                val r = if (showEditLayout) live()[id] else customPositions?.get(id)
+                r?.toDeckRect() ?: default
             }
-            return Modifier
-                .offset(x = pad + innerW * r.left, y = pad + innerH * r.top)
-                .size(width = innerW * r.w, height = innerH * r.h)
-        }
 
         UtilButton(
             label = "LIGHTS", description = "pad:LIGHTS", tint = PitWall.ButtonLabel,
@@ -422,13 +426,26 @@ fun TruckDeck2(
             modifier = place("WIPER", DeckLayout.utilBtn(1, aspect)),
             onPress = { down -> if (down) tapHi(ButtonHi.WIPERS, 120, { wiperBusy }, { wiperBusy = it }) },
         ) { tint, m -> DeckIcons.wiper(tint, m) }
+        // Washer. The icon draws spray and the state is washerBusy, but the label read "VIPER" — a typo
+        // for the button next to it, on the one control whose whole job is to not be confused with it.
+        // ponytail: holds the *wiper* bit for 700 ms because all 16 hi bits are spoken for; a real
+        // washer binding needs a wire bit, so it needs HiBitNames and TruckKeys.names to grow together.
+        // The layout id stays "VIPER" so a saved custom position for it still resolves.
         UtilButton(
-            label = "VIPER", description = "pad:VIPER", tint = PitWall.ButtonLabel,
+            label = "WASHER", description = "pad:WASHER", tint = PitWall.ButtonLabel,
             modifier = place("VIPER", DeckLayout.utilBtn(2, aspect)),
             onPress = { down -> if (down) tapHi(ButtonHi.WIPERS, 700, { washerBusy }, { washerBusy = it }) },
-        ) { tint, m -> DeckIcons.viper(tint, m) }
+        ) { tint, m -> DeckIcons.washer(tint, m) }
 
         GearSelector(gear, ::selectGear, ::declareGear, place("GEAR", DeckLayout.gearSel()))
+
+        LinkStrip(
+            state = linkState,
+            rtt = rtt,
+            loss = loss,
+            transportName = transport.transport,
+            modifier = place("LINK", DeckLayout.linkStrip()),
+        )
 
         UtilButton(
             label = "HANDBRAKE", description = "pad:HANDBRAKE", tint = PitWall.SignalRed,
@@ -502,17 +519,25 @@ fun TruckDeck2(
             LayoutEditOverlay(
                 prefs = prefs,
                 mode = mode,
-                positions = livePositions,
+                baseline = editBaseline,
+                live = live,
                 pad = pad,
                 innerW = innerW,
                 innerH = innerH,
-                hasChanges = editPositions != null,
-                onChange = { id, p -> editPositions = livePositions + (id to p) },
+                hasChanges = hasEdits,
+                // Reads the state, not a composition snapshot: drag events land between frames, so
+                // a captured map would be one or more edits behind.
+                onChange = { id, p ->
+                    editPositions = (editPositions ?: editBaseline) + (id to p)
+                    hasEdits = true
+                },
                 onSave = {
                     tick()
-                    LayoutPreferences.save(prefs, mode, livePositions)
-                    customPositions = livePositions
+                    val saved = live()
+                    LayoutPreferences.save(prefs, mode, saved)
+                    customPositions = saved
                     editPositions = null
+                    hasEdits = false
                     showEditLayout = false
                 },
                 onReset = {
@@ -521,10 +546,12 @@ fun TruckDeck2(
                     LayoutPreferences.clear(prefs, mode)
                     customPositions = null
                     editPositions = null
+                    hasEdits = false
                 },
                 onCancel = {
                     tick()
                     editPositions = null
+                    hasEdits = false
                     showEditLayout = false
                 },
             )
@@ -666,7 +693,10 @@ private fun UtilButton(
                 label,
                 modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp, start = 2.dp, end = 2.dp),
                 color = if (down) PitWall.Ink else (labelColor ?: PitWall.ButtonLabel),
-                fontSize = if (label == "HANDBRAKE" || label == "SETTINGS" || label == "ACCELERATOR") 8.5.sp else 9.5.sp,
+                // Long labels ("HANDBRAKE", "ACCELERATOR") need the smaller step to stay on one line.
+                // Keyed on length, not on the label strings themselves — the string list silently
+                // stopped covering whatever label was added next.
+                fontSize = if (label.length > 7) 8.5.sp else 9.5.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 0.4.sp,
                 maxLines = 1,
@@ -674,6 +704,45 @@ private fun UtilButton(
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             )
         }
+    }
+}
+
+/**
+ * Always-on link readout. Driving is the one time the link matters and the one time you cannot open
+ * a menu to check it, so state / transport / RTT / loss sit on the deck itself. Deliberately not
+ * tappable: it is a readout beside a MENU button, and a strip this thin cannot honour the 44 dp
+ * touch floor. It is in the layout editor's element set, so it can be moved out of the way.
+ */
+@Composable
+private fun LinkStrip(
+    state: ConnState,
+    rtt: Long,
+    loss: Int,
+    transportName: String,
+    modifier: Modifier,
+) {
+    val (line, color) = PitWall.linkReadout(state, transportName, rtt, loss)
+    Row(
+        modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(PitWall.Panel)
+            .border(1.dp, PitWall.PanelBorder, RoundedCornerShape(6.dp))
+            .semantics { contentDescription = "link: $line" }
+            .padding(horizontal = 8.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(6.dp).clip(CircleShape).background(color))
+        Text(
+            line,
+            modifier = Modifier.padding(start = 6.dp),
+            color = color,
+            fontSize = 9.5.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.6.sp,
+            maxLines = 1,
+            softWrap = false,
+        )
     }
 }
 
@@ -1115,9 +1184,12 @@ private fun MetallicPedal(
         }
         Text(
             label,
+            // Inside the pedal, not 16 dp below it. The layout editor lets a pedal be dragged to the
+            // very bottom of the canvas, and a label placed outside the element's own box has nothing
+            // left to be drawn in — it silently vanished, on the two controls you steer the truck with.
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .offset(y = 16.dp),
+                .padding(bottom = 5.dp),
             color = if (down) PitWall.Ink else PitWall.ButtonLabel,
             fontSize = 9.sp,
             fontWeight = FontWeight.Bold,
@@ -1456,7 +1528,7 @@ private object DeckIcons {
     }
 
     @Composable
-    fun viper(tint: Color, modifier: Modifier) {
+    fun washer(tint: Color, modifier: Modifier) {
         Canvas(modifier) {
             val w = size.width
             val h = size.height

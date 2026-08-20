@@ -25,16 +25,15 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -45,12 +44,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.europad.app.R
@@ -75,7 +74,9 @@ fun DeckPickerScreen() {
     var connecting by remember { mutableStateOf(false) }
     var connectionMethod by remember { mutableStateOf(ConnectionMethod.Wifi) }
     var manualIp by remember { mutableStateOf(prefs.getString("lastIp", "192.168.1.50") ?: "192.168.1.50") }
-    var statusText by remember { mutableStateOf("Scanning LAN for PC...") }
+    // Blank unless the server was started with --pin. Kept as text so a leading zero survives.
+    var pin by remember { mutableStateOf(prefs.getString("pin", "") ?: "") }
+    var connectError by remember { mutableStateOf<String?>(null) }
 
     var truckMode by remember { mutableStateOf(prefs.getString("truckMode", "wheel") ?: "wheel") }
 
@@ -112,21 +113,31 @@ fun DeckPickerScreen() {
     fun connectTo(host: String, port: Int) {
         if (connecting) return
         connecting = true
-        statusText = "Connecting to $host:$port..."
+        connectError = null
+        // Blank PIN sends 0, which is the server's own "no --pin configured" value.
+        val pinCode = pin.trim().toIntOrNull() ?: 0
         scope.launch {
             val st = withContext(Dispatchers.IO) {
-                transport.connect(host, port, 0)
+                transport.connect(host, port, pinCode)
             }
             connecting = false
             if (st == ConnState.Connected) {
                 connected = true
-                statusText = "Connected to $host"
-                prefs.edit().putString("lastIp", host).apply()
+                prefs.edit().putString("lastIp", host).putString("pin", pin.trim()).apply()
                 showingDeck = true
             } else {
-                statusText = "Connection failed. Please retry."
+                connectError = PitWall.failureText(st, transport.rejectReason)
             }
         }
+    }
+
+    val statusText = when {
+        connecting -> "CONNECTING"
+        connected -> "PAIRED"
+        connectError != null -> connectError!!
+        discovered.isEmpty() -> "SCANNING"
+        discovered.size == 1 -> "1 SERVER"
+        else -> "${discovered.size} SERVERS"
     }
 
     if (showingDeck) {
@@ -138,15 +149,11 @@ fun DeckPickerScreen() {
         return
     }
 
-    // Modern High-Tech Dashboard
+    // Ink-black ground, hairline panels, indigo only where something is selected (DESIGN.md).
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    listOf(Color(0xFF07070A), Color(0xFF0D0D14), Color(0xFF060609)),
-                ),
-            )
+            .background(PitWall.Ground)
             .padding(horizontal = 20.dp, vertical = 12.dp),
     ) {
         Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -168,7 +175,7 @@ fun DeckPickerScreen() {
                         modifier = Modifier
                             .size(42.dp)
                             .clip(CircleShape)
-                            .border(1.5.dp, PitWall.WheelGlow.copy(alpha = 0.6f), CircleShape),
+                            .border(1.5.dp, PitWall.Indigo, CircleShape),
                     )
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -183,26 +190,29 @@ fun DeckPickerScreen() {
                                 Modifier
                                     .clip(RoundedCornerShape(4.dp))
                                     .background(PitWall.Indigo.copy(alpha = 0.25f))
-                                    .border(1.dp, PitWall.Indigo.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
+                                    .border(1.dp, PitWall.Indigo, RoundedCornerShape(4.dp))
                                     .padding(horizontal = 6.dp, vertical = 2.dp),
                             ) {
-                                Text("PRO ETS2 TELEMETRY", color = PitWall.WheelGlow, fontSize = 8.5.sp, fontWeight = FontWeight.Bold)
+                                // The port, not a tagline: it is the one number you need when the PC's
+                                // firewall prompt shows up.
+                                Text("UDP ${Proto.DEFAULT_PORT}", color = PitWall.Ink, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                             }
                         }
-                        Text("YOUR PHONE. YOUR VIRTUAL TRUCK CONTROLLER.", color = PitWall.TowerGray, fontSize = 9.sp, letterSpacing = 0.5.sp)
+                        Text("Virtual Xbox 360 pad and ETS2 keys, over your LAN", color = PitWall.TowerGray, fontSize = 10.sp)
                     }
                 }
 
-                // Direct Offline Drive Button
+                // Straight to the deck. Without a paired PC it still runs — the deck's own link strip
+                // is what says the frames are going nowhere, so this button does not have to.
                 Button(
                     onClick = { showingDeck = true },
                     shape = RoundedCornerShape(20.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF191924)),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, PitWall.Indigo.copy(alpha = 0.6f)),
+                    colors = ButtonDefaults.buttonColors(containerColor = PitWall.Panel),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, PitWall.PanelBorder),
                     modifier = Modifier.height(38.dp),
                 ) {
                     Text(
-                        if (connected) "➔ ENTER ACTIVE COCKPIT" else "➔ DRIVE / TEST OFFLINE",
+                        if (connected) "OPEN DECK" else "DRIVE OFFLINE",
                         color = if (connected) PitWall.SignalGreen else PitWall.Ink,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
@@ -224,8 +234,8 @@ fun DeckPickerScreen() {
                         .weight(0.48f)
                         .fillMaxHeight()
                         .clip(RoundedCornerShape(14.dp))
-                        .background(Color(0xFF0F0F16))
-                        .border(1.dp, Color(0xFF232330), RoundedCornerShape(14.dp))
+                        .background(PitWall.Panel)
+                        .border(1.dp, PitWall.PanelBorder, RoundedCornerShape(14.dp))
                         .padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
@@ -234,36 +244,39 @@ fun DeckPickerScreen() {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         ConnectionTile(
                             title = "WI-FI / HOTSPOT",
-                            subtitle = "Auto-Discovery on LAN",
+                            subtitle = "Found over mDNS",
                             selected = connectionMethod == ConnectionMethod.Wifi,
                             modifier = Modifier.weight(1f),
                         ) { connectionMethod = ConnectionMethod.Wifi }
 
                         ConnectionTile(
                             title = "USB TETHERING",
-                            subtitle = "Ultra-Low Latency (<1ms)",
+                            // No published number: the wire cost is the phone's own send loop plus USB,
+                            // and claiming "<1 ms" was a figure nothing in the build measures.
+                            subtitle = "No Wi-Fi jitter",
                             selected = connectionMethod == ConnectionMethod.Usb,
                             modifier = Modifier.weight(1f),
                         ) { connectionMethod = ConnectionMethod.Usb }
                     }
 
-                    // Mode Instructions
                     Box(
                         Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFF151520))
+                            .background(PitWall.Ground)
+                            .border(1.dp, PitWall.PanelBorder, RoundedCornerShape(8.dp))
                             .padding(horizontal = 10.dp, vertical = 7.dp),
                     ) {
                         Text(
                             if (connectionMethod == ConnectionMethod.Usb) {
-                                "⚡ Connect phone via USB cable and enable 'USB Tethering' in Android settings."
+                                "Plug in the cable, then turn on USB tethering in Android settings."
                             } else {
-                                "📶 Connect phone and PC to the same Wi-Fi or mobile hotspot. Discovery connects automatically."
+                                // It never connected automatically: discovery only lists servers.
+                                "Put the phone and PC on the same Wi-Fi or hotspot, then tap a server."
                             },
                             color = PitWall.TowerGray,
-                            fontSize = 9.sp,
-                            lineHeight = 12.sp,
+                            fontSize = 10.sp,
+                            lineHeight = 13.sp,
                         )
                     }
 
@@ -316,7 +329,7 @@ fun DeckPickerScreen() {
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text("HAPTIC FEEDBACK", color = PitWall.TowerGray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                        Text(if (hapticIntensity > 0.05f) "${(hapticIntensity * 100).toInt()}%" else "OFF", color = PitWall.WheelGlow, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        Text(if (hapticIntensity > 0.05f) "${(hapticIntensity * 100).toInt()}%" else "OFF", color = PitWall.Ink, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                     }
                     Slider(
                         value = hapticIntensity,
@@ -325,9 +338,9 @@ fun DeckPickerScreen() {
                             prefs.edit().putFloat("hapticIntensity", it).apply()
                         },
                         colors = SliderDefaults.colors(
-                            thumbColor = PitWall.WheelGlow,
-                            activeTrackColor = PitWall.WheelGlow,
-                            inactiveTrackColor = Color(0xFF232330),
+                            thumbColor = PitWall.Ink,
+                            activeTrackColor = PitWall.Indigo,
+                            inactiveTrackColor = PitWall.PanelBorder,
                         ),
                         modifier = Modifier.height(24.dp),
                     )
@@ -339,8 +352,8 @@ fun DeckPickerScreen() {
                         .weight(0.52f)
                         .fillMaxHeight()
                         .clip(RoundedCornerShape(14.dp))
-                        .background(Color(0xFF0F0F16))
-                        .border(1.dp, Color(0xFF232330), RoundedCornerShape(14.dp))
+                        .background(PitWall.Panel)
+                        .border(1.dp, PitWall.PanelBorder, RoundedCornerShape(14.dp))
                         .padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
@@ -354,15 +367,26 @@ fun DeckPickerScreen() {
                                 Modifier
                                     .size(8.dp)
                                     .clip(CircleShape)
-                                    .background(if (connected) PitWall.SignalGreen else PitWall.WheelGlow)
-                                    .alpha(if (connecting || !connected) pulseAlpha else 1f),
+                                    .background(
+                                        when {
+                                            connected -> PitWall.SignalGreen
+                                            connectError != null -> PitWall.SignalRed
+                                            else -> PitWall.Indigo
+                                        },
+                                    )
+                                    .alpha(if (connecting || (!connected && connectError == null)) pulseAlpha else 1f),
                             )
-                            Text("PC SERVER RADAR", color = PitWall.Ink, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                            Text("PC SERVERS", color = PitWall.Ink, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
                         }
                         Text(
-                            if (connecting) "CONNECTING..." else statusText,
-                            color = if (connected) PitWall.SignalGreen else PitWall.TowerGray,
-                            fontSize = 9.5.sp,
+                            statusText,
+                            color = when {
+                                connected -> PitWall.SignalGreen
+                                connectError != null -> PitWall.SignalRed
+                                else -> PitWall.TowerGray
+                            },
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
                             maxLines = 1,
                         )
                     }
@@ -374,13 +398,13 @@ fun DeckPickerScreen() {
                                 .fillMaxWidth()
                                 .weight(1f)
                                 .clip(RoundedCornerShape(10.dp))
-                                .background(Color(0xFF08080C))
-                                .border(1.dp, Color(0xFF1C1C26), RoundedCornerShape(10.dp)),
+                                .background(PitWall.Ground)
+                                .border(1.dp, PitWall.PanelBorder, RoundedCornerShape(10.dp)),
                             contentAlignment = Alignment.Center,
                         ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text("Searching for EuroPad PC Server on LAN...", color = PitWall.TowerGray, fontSize = 11.5.sp)
-                                Text("Launch EuroPad server on PC or connect via direct IP below", color = PitWall.TowerGray.copy(alpha = 0.5f), fontSize = 9.sp)
+                                Text("No servers found yet", color = PitWall.Ink, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Text("Start EuroPad on the PC, or type its IP below", color = PitWall.TowerGray, fontSize = 10.sp)
                             }
                         }
                     } else {
@@ -395,80 +419,64 @@ fun DeckPickerScreen() {
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .clip(RoundedCornerShape(10.dp))
-                                        .background(Color(0xFF181822))
-                                        .border(1.dp, PitWall.Indigo.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                                        .background(PitWall.Ground)
+                                        .border(1.dp, PitWall.PanelBorder, RoundedCornerShape(10.dp))
                                         .clickable { connectTo(info.host, info.port) }
                                         .padding(horizontal = 14.dp, vertical = 12.dp),
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                            Text(info.name, color = PitWall.Ink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                                            Box(
-                                                Modifier
-                                                    .clip(RoundedCornerShape(3.dp))
-                                                    .background(PitWall.SignalGreen.copy(alpha = 0.2f))
-                                                    .padding(horizontal = 5.dp, vertical = 1.dp),
-                                            ) {
-                                                Text("ONLINE", color = PitWall.SignalGreen, fontSize = 7.5.sp, fontWeight = FontWeight.Bold)
-                                            }
-                                        }
+                                        Text(info.name, color = PitWall.Ink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                                         Text("${info.host}:${info.port}", color = PitWall.TowerGray, fontSize = 10.sp)
                                     }
 
                                     Button(
                                         onClick = { connectTo(info.host, info.port) },
                                         shape = RoundedCornerShape(6.dp),
-                                        colors = ButtonDefaults.buttonColors(containerColor = PitWall.SignalGreen),
+                                        colors = ButtonDefaults.buttonColors(containerColor = PitWall.Indigo),
                                         modifier = Modifier.height(34.dp),
                                     ) {
-                                        Text("CONNECT ➔", color = PitWall.Ink, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                        Text("PAIR", color = PitWall.Ink, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
                                     }
                                 }
                             }
                         }
                     }
 
-                    // Direct IP Connect Bar
+                    // Direct connect. The PIN is blank unless the PC was started with --pin: the server
+                    // rejects a HELLO whose PIN does not match, and this app had no way to send one, so
+                    // a PIN-gated server was unpairable from the phone.
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(38.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFF0A0A10))
-                                .border(1.dp, Color(0xFF282838), RoundedCornerShape(8.dp))
-                                .padding(horizontal = 12.dp),
-                            contentAlignment = Alignment.CenterStart,
-                        ) {
-                            if (manualIp.isEmpty()) {
-                                Text("Enter PC IP (e.g. 192.168.1.50)", color = PitWall.TowerGray.copy(alpha = 0.5f), fontSize = 11.sp)
-                            }
-                            androidx.compose.foundation.text.BasicTextField(
-                                value = manualIp,
-                                onValueChange = { manualIp = it },
-                                modifier = Modifier.fillMaxWidth(),
-                                singleLine = true,
-                                textStyle = androidx.compose.ui.text.TextStyle(
-                                    color = PitWall.Ink,
-                                    fontSize = 11.5.sp,
-                                    fontWeight = FontWeight.Medium,
-                                ),
-                                cursorBrush = androidx.compose.ui.graphics.SolidColor(PitWall.WheelGlow),
-                            )
-                        }
+                        FieldBox(
+                            value = manualIp,
+                            placeholder = "PC IP (e.g. 192.168.1.50)",
+                            keyboard = KeyboardType.Uri,
+                            modifier = Modifier.weight(1f),
+                        ) { manualIp = it.trim() }
+
+                        FieldBox(
+                            value = pin,
+                            placeholder = "PIN",
+                            keyboard = KeyboardType.NumberPassword,
+                            modifier = Modifier.width(74.dp),
+                        ) { typed -> pin = typed.filter { it.isDigit() }.take(4) }
+
                         Button(
                             onClick = { connectTo(manualIp.trim(), Proto.DEFAULT_PORT) },
+                            enabled = !connecting && manualIp.isNotBlank(),
                             modifier = Modifier.height(38.dp),
                             shape = RoundedCornerShape(8.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = PitWall.Indigo),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = PitWall.Indigo,
+                                disabledContainerColor = PitWall.PanelBorder,
+                            ),
                         ) {
-                            Text("CONNECT", fontSize = 10.5.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
+                            Text("PAIR", fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
                         }
                     }
                 }
@@ -485,19 +493,17 @@ private fun ConnectionTile(
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
-    val bg = if (selected) Color(0xFF1E1E2E) else Color(0xFF14141C)
-    val border = if (selected) PitWall.WheelGlow else Color(0xFF242430)
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(10.dp))
-            .background(bg)
-            .border(1.dp, border, RoundedCornerShape(10.dp))
+            .background(if (selected) PitWall.Indigo.copy(alpha = 0.22f) else PitWall.Ground)
+            .border(1.dp, if (selected) PitWall.Indigo else PitWall.PanelBorder, RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
             .padding(10.dp),
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(title, color = if (selected) PitWall.Ink else PitWall.TowerGray, fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
-            Text(subtitle, color = PitWall.TowerGray.copy(alpha = 0.75f), fontSize = 8.sp, maxLines = 1)
+            Text(subtitle, color = PitWall.TowerGray, fontSize = 9.5.sp, maxLines = 1)
         }
     }
 }
@@ -510,20 +516,53 @@ private fun SteeringChoiceCard(
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
-    val bg = if (selected) Color(0xFF1E1E2E) else Color(0xFF14141C)
-    val border = if (selected) PitWall.SignalGreen else Color(0xFF242430)
+    // Indigo, not green: green is reserved for a healthy link, and two different "selected" colours on
+    // one screen read as two different kinds of state.
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(10.dp))
-            .background(bg)
-            .border(1.dp, border, RoundedCornerShape(10.dp))
+            .background(if (selected) PitWall.Indigo.copy(alpha = 0.22f) else PitWall.Ground)
+            .border(1.dp, if (selected) PitWall.Indigo else PitWall.PanelBorder, RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
             .padding(10.dp),
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(label, color = if (selected) PitWall.SignalGreen else PitWall.TowerGray, fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
-            Text(detail, color = PitWall.TowerGray.copy(alpha = 0.75f), fontSize = 8.sp, maxLines = 1)
+            Text(label, color = if (selected) PitWall.Ink else PitWall.TowerGray, fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
+            Text(detail, color = PitWall.TowerGray, fontSize = 9.5.sp, maxLines = 1)
         }
+    }
+}
+
+/** Hairline single-line field. Shared by the IP and PIN boxes so they cannot drift apart. */
+@Composable
+private fun FieldBox(
+    value: String,
+    placeholder: String,
+    keyboard: KeyboardType,
+    modifier: Modifier = Modifier,
+    onValueChange: (String) -> Unit,
+) {
+    Box(
+        modifier = modifier
+            .height(38.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(PitWall.Ground)
+            .border(1.dp, PitWall.PanelBorder, RoundedCornerShape(8.dp))
+            .padding(horizontal = 12.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        if (value.isEmpty()) {
+            Text(placeholder, color = PitWall.TowerGray, fontSize = 11.sp, maxLines = 1)
+        }
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = keyboard),
+            textStyle = TextStyle(color = PitWall.Ink, fontSize = 11.5.sp, fontWeight = FontWeight.Medium),
+            cursorBrush = SolidColor(PitWall.Ink),
+        )
     }
 }
 

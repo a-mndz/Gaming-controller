@@ -30,9 +30,11 @@ object DeckLayout {
     private val TOP_RIGHT_X = floatArrayOf(0.72f, 0.83f, 0.93f)
 
     const val LINK_CX = 0.50f
-    const val LINK_CY = 0.155f
-    const val LINK_W = 0.30f
-    const val LINK_H = 0.025f
+    const val LINK_CY = 0.20f
+    const val LINK_W = 0.26f
+    // Tall enough for a 9.5 sp readout inside a hairline box. The original 0.025 was sized for a bar
+    // graphic that was never drawn, and text at that height clips on every phone.
+    const val LINK_H = 0.075f
 
     const val ARROWS_CX = 0.10f
     const val ARROWS_CY = 0.26f
@@ -68,6 +70,7 @@ object DeckLayout {
 
     fun gearSel() = DeckRect(GEAR_CX, GEAR_CY, GEAR_SEG_W * 3f, GEAR_H)
 
+    /** Live link readout: state dot, transport, median RTT, loss. Rendered by `LinkStrip`. */
     fun linkStrip() = DeckRect(LINK_CX, LINK_CY, LINK_W, LINK_H)
 
     fun arrows() = DeckRect(ARROWS_CX, ARROWS_CY, ARROWS_W, ARROWS_H)

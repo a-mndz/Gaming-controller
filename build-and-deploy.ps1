@@ -12,9 +12,18 @@
         3. dotnet publish -> server-bin\EuroPadServer.exe
         4. start the server again in its own window (the pairing QR + PIN print there)
         5. gradle testDebugUnitTest assembleDebug   (JAVA_HOME pinned to JDK 17)
-        6. adb am force-stop  +  adb install -r  +  relaunch
+           plus bundleDebug when -Bundle is passed
+        6. copy the fresh APK over EuroPad-Mobile.apk at the repo root, and the AAB over
+           EuroPad-Mobile.aab when -Bundle. Both are tracked on purpose - they are the
+           "install this now" snapshot, and refreshing them by hand is how the .aab ended up
+           a day behind the .apk. -NoCopy leaves them alone. Without -Bundle the summary
+           reports the root .aab as STALE rather than letting it drift unnoticed.
+        7. adb am force-stop  +  adb install -r  +  relaunch
            ("install -r" does NOT kill the running app: without the force-stop the phone
             keeps showing the old build and you chase ghosts)
+
+    Nothing in step 6 can fail the run: a locked or missing snapshot degrades to a WARN row,
+    because the whole point is step 7.
 
     Every external tool is located rather than assumed to be on PATH. Nothing is
     redirected with PowerShell's ">" operator anywhere in here - it mangles binary and
@@ -22,11 +31,17 @@
 
 .EXAMPLE
     .\build-and-deploy.ps1
-        Full loop: server tests, publish, restart, app tests, APK, install, relaunch.
+        Full loop: server tests, publish, restart, app tests, APK, refresh the root
+        snapshot, install, relaunch.
 
 .EXAMPLE
     .\build-and-deploy.ps1 -SkipServer
         Phone only - fastest way to iterate on Kotlin.
+
+.EXAMPLE
+    .\build-and-deploy.ps1 -SkipServer -Bundle
+        Phone, plus refresh EuroPad-Mobile.aab. Use this before committing or sharing,
+        so the .apk and .aab in the folder describe the same build.
 
 .EXAMPLE
     .\build-and-deploy.ps1 -SkipTests -SkipApp
@@ -46,6 +61,12 @@ param(
     [switch]$SkipServer,
     # Build the APK but do not touch the phone.
     [switch]$NoInstall,
+    # Also run bundleDebug and refresh EuroPad-Mobile.aab. Off by default: it roughly doubles the
+    # Android build time and the phone is installed from the APK, so it is wasted on a normal
+    # code-and-check loop.
+    [switch]$Bundle,
+    # Leave EuroPad-Mobile.apk / .aab at the repo root alone (build to app\build only).
+    [switch]$NoCopy,
     # Publish the server but leave it stopped.
     [switch]$NoServerStart,
     # Wipe the phone's logcat after launching, so the next capture is clean.
@@ -59,6 +80,10 @@ $AppDir     = Join-Path $Root 'app'
 $Sln        = Join-Path $Root 'server\EuroPad.Server.sln'
 $Csproj     = Join-Path $Root 'server\EuroPad.Server\EuroPad.Server.csproj'
 $ServerOut  = Join-Path $Root 'server-bin'
+# Tracked on purpose - see the .gitignore header. These are the two files a person is told to grab
+# from the folder, so the script keeps them in step with the tree rather than trusting a manual copy.
+$ApkShip    = Join-Path $Root 'EuroPad-Mobile.apk'
+$AabShip    = Join-Path $Root 'EuroPad-Mobile.aab'
 $PackageId  = 'com.europad.app'
 $Activity   = "$PackageId/.MainActivity"
 
@@ -223,6 +248,10 @@ try {
         $gradleTasks = @('-p', $AppDir, '--console=plain')
         if (-not $SkipTests) { $gradleTasks += 'testDebugUnitTest' }
         $gradleTasks += 'assembleDebug'
+        # Same debug keystore as the APK, so the pair always describes one build. Unqualified, like
+        # assembleDebug above: with "-p app" the name is matched across that build's projects, and
+        # app\settings.gradle.kts includes only :app, so there is nothing to be ambiguous with.
+        if ($Bundle) { $gradleTasks += 'bundleDebug' }
         Invoke-Native -File $gradle -Arguments $gradleTasks -What 'Gradle build'
         Add-Result 'App unit tests' $(if ($SkipTests) { 'SKIPPED' } else { 'OK' })
 
@@ -230,6 +259,69 @@ try {
         if (-not (Test-Path -LiteralPath $apk)) { throw "APK not found at $apk" }
         $apkInfo = Get-Item -LiteralPath $apk
         Add-Result 'APK build' 'OK' ("{0:N1} MB, {1:HH:mm:ss}" -f ($apkInfo.Length / 1MB), $apkInfo.LastWriteTime)
+
+        # ------------------------------------------------------------- repo-root snapshots
+        # Nothing below is allowed to abort the run. The point of this script is getting the build
+        # onto the phone, and a snapshot problem - Windows holding a handle on a 25 MB file, or a
+        # future AGP renaming its output - must not cost you the install. Every failure here degrades
+        # to a WARN row in the summary instead.
+        # -ErrorAction Stop is explicit rather than relying on the ambient preference, which is
+        # deliberately flipped to 'Continue' further down in this same scope for the adb call.
+        $copiedApk = $false
+        if ($NoCopy) {
+            Add-Result 'Copy to repo root' 'SKIPPED' '-NoCopy'
+        } else {
+            try {
+                Copy-Item -LiteralPath $apk -Destination $ApkShip -Force -ErrorAction Stop
+                $copiedApk = $true
+                Add-Result 'Copy to repo root' 'OK' 'EuroPad-Mobile.apk'
+            } catch {
+                Write-Host "Could not refresh EuroPad-Mobile.apk: $($_.Exception.Message)" -ForegroundColor Yellow
+                Add-Result 'Copy to repo root' 'WARN' 'apk in use - snapshot left stale'
+            }
+        }
+
+        $copiedAab = $false
+        $aab = Join-Path $AppDir 'app\build\outputs\bundle\debug\app-debug.aab'
+        if ($Bundle -and -not (Test-Path -LiteralPath $aab)) {
+            # bundleDebug reported success, so this means the output moved (an archivesName or
+            # outputFileName override in app\app\build.gradle.kts would do it), not a build failure.
+            Write-Host "bundleDebug ran but produced no AAB at $aab" -ForegroundColor Yellow
+            Add-Result 'AAB build' 'WARN' 'built, but not at the expected path'
+        } elseif ($Bundle) {
+            $aabInfo = Get-Item -LiteralPath $aab
+            $aabNote = "{0:N1} MB, {1:HH:mm:ss}" -f ($aabInfo.Length / 1MB), $aabInfo.LastWriteTime
+            $aabState = 'OK'
+            if ($NoCopy) {
+                $aabNote = "$aabNote - not copied (-NoCopy)"
+            } else {
+                try {
+                    Copy-Item -LiteralPath $aab -Destination $AabShip -Force -ErrorAction Stop
+                    $copiedAab = $true
+                } catch {
+                    Write-Host "Could not refresh EuroPad-Mobile.aab: $($_.Exception.Message)" -ForegroundColor Yellow
+                    $aabState = 'WARN'
+                    $aabNote = "$aabNote - built, but the root copy is in use"
+                }
+            }
+            Add-Result 'AAB build' $aabState $aabNote
+        } elseif ($NoCopy) {
+            # Saying "re-run with -Bundle" here would be a lie: -Bundle -NoCopy skips the copy too.
+            Add-Result 'AAB build' 'SKIPPED' '-NoCopy'
+        } elseif (Test-Path -LiteralPath $AabShip) {
+            # Not a failure - just refuse to let it rot silently, which is what happened when the
+            # only way to refresh it was to remember to run bundleDebug by hand.
+            # The 5 minute grace stops one build's own pair tripping the check: Copy-Item preserves
+            # timestamps and the two tasks can finish in either order under --parallel.
+            $shippedAab = (Get-Item -LiteralPath $AabShip).LastWriteTime
+            if ($shippedAab -lt $apkInfo.LastWriteTime.AddMinutes(-5)) {
+                Add-Result 'AAB build' 'STALE' ("{0:yyyy-MM-dd HH:mm} - re-run with -Bundle" -f $shippedAab)
+            } else {
+                Add-Result 'AAB build' 'SKIPPED' 'pass -Bundle to rebuild'
+            }
+        } else {
+            Add-Result 'AAB build' 'SKIPPED' 'pass -Bundle to build one'
+        }
 
         if ($NoInstall) {
             Add-Result 'Phone install' 'SKIPPED' '-NoInstall'
@@ -283,6 +375,10 @@ try {
     Write-Head 'Summary'
     $script:Results | Format-Table -AutoSize | Out-String | Write-Host
     Write-Host 'Done. Both sides are current.' -ForegroundColor Green
+    # Gated on what was actually written, not on the switches: a copy that hit the WARN branch above
+    # must not be advertised here as a fresh file.
+    if ($copiedApk) { Write-Host "Folder copy: $ApkShip" -ForegroundColor DarkGray }
+    if ($copiedAab) { Write-Host "Folder copy: $AabShip" -ForegroundColor DarkGray }
     if (-not $SkipApp -and -not $NoInstall -and $adb) {
         Write-Host 'Live phone log:  adb logcat -s EuroPadUDP:* *:S' -ForegroundColor DarkGray
     }

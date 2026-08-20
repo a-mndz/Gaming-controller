@@ -11,6 +11,12 @@ public sealed class KeyboardEmulator
 
     public KeyboardEmulator(KeySender send) => _send = send;
 
+    /// <summary>
+    /// Presses/releases only the bits that changed between the two hi-button words. Releasing one
+    /// slot's held keys is <c>Apply(keys, held, 0)</c> — there is deliberately no ReleaseAll, because
+    /// a blind release of every mapped key let one phone's failsafe drop the horn another phone was
+    /// still holding.
+    /// </summary>
     public void Apply(byte[] keysByBit, ushort prevHi, ushort curHi)
     {
         ushort changed = (ushort)(prevHi ^ curHi);
@@ -25,15 +31,6 @@ public sealed class KeyboardEmulator
                 if (vk == 0) continue;
                 _send(vk, (curHi & (1 << bit)) != 0);
             }
-        }
-    }
-
-    public void ReleaseAll(byte[] keysByBit)
-    {
-        lock (_gate)
-        {
-            foreach (var vk in keysByBit)
-                if (vk != 0) _send(vk, false);
         }
     }
 }

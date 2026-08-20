@@ -1,7 +1,6 @@
 package com.europad.app
 
 import com.europad.app.ui.DeckRect
-import com.europad.app.ui.ElementId
 import com.europad.app.ui.ElementPosition
 import com.europad.app.ui.LayoutPreset
 import kotlinx.serialization.encodeToString
@@ -142,57 +141,6 @@ class LayoutModelsTest {
         assertEquals(0.7f, position.cy, 0.0001f)
         assertEquals(0.2f, position.w, 0.0001f)
         assertEquals(0.15f, position.h, 0.0001f)
-    }
-
-    // ============================
-    // ElementId Enum Tests
-    // ============================
-
-    @Test
-    fun `ElementId contains all required control elements`() {
-        val requiredElements = setOf(
-            "LIGHTS", "WIPER", "VIPER", "HANDBRAKE", "SETTINGS", "MENU",
-            "CAMERA", "GEAR", "INDICATORS", "WHEEL", "ACCEL", "BRAKE",
-            "GYRO_ACCEL", "GYRO_BRAKE"
-        )
-
-        val actualElements = ElementId.values().map { it.name }.toSet()
-
-        assertEquals(requiredElements, actualElements)
-    }
-
-    @Test
-    fun `ElementId has display names for all elements`() {
-        for (element in ElementId.values()) {
-            assertTrue(
-                "Element ${element.name} should have non-empty display name",
-                element.displayName.isNotEmpty()
-            )
-        }
-    }
-
-    @Test
-    fun `ElementId wheelModeElements contains correct elements`() {
-        val expectedCount = 12 // All elements except GYRO_ACCEL and GYRO_BRAKE
-
-        assertEquals(expectedCount, ElementId.wheelModeElements.size)
-        assertTrue(ElementId.wheelModeElements.contains(ElementId.WHEEL))
-        assertTrue(ElementId.wheelModeElements.contains(ElementId.ACCEL))
-        assertTrue(ElementId.wheelModeElements.contains(ElementId.BRAKE))
-        assertTrue(!ElementId.wheelModeElements.contains(ElementId.GYRO_ACCEL))
-        assertTrue(!ElementId.wheelModeElements.contains(ElementId.GYRO_BRAKE))
-    }
-
-    @Test
-    fun `ElementId gyroModeElements contains correct elements`() {
-        val expectedCount = 11 // All elements except WHEEL and touch ACCEL/BRAKE
-
-        assertEquals(expectedCount, ElementId.gyroModeElements.size)
-        assertTrue(!ElementId.gyroModeElements.contains(ElementId.WHEEL))
-        assertTrue(!ElementId.gyroModeElements.contains(ElementId.ACCEL))
-        assertTrue(!ElementId.gyroModeElements.contains(ElementId.BRAKE))
-        assertTrue(ElementId.gyroModeElements.contains(ElementId.GYRO_ACCEL))
-        assertTrue(ElementId.gyroModeElements.contains(ElementId.GYRO_BRAKE))
     }
 
     // ============================

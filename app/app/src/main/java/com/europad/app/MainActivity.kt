@@ -60,8 +60,8 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Doze exemption (T2.8 / NFR-3): the sender coroutine starves inside Doze's app standby,
-     * which the server reads as a 300 ms failsafe. Ask once, on first launch — the system
-     * remembers the answer, so later launches skip straight through.
+     * which the server reads as silence and answers with a failsafe. Ask once, on first launch —
+     * the system remembers the answer, so later launches skip straight through.
      */
     private fun requestBatteryExemptionOnce() {
         val prefs = getSharedPreferences("europad", MODE_PRIVATE)

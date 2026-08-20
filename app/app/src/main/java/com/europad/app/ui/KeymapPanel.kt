@@ -7,11 +7,14 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -53,6 +56,7 @@ private val RETURN_MS_MAX = SteerReturn.MAX_MS.toFloat()
  * @param pendingKeys actions saved on the phone but not yet pushed over a live link (shown amber)
  * @param sentKeys actions confirmed pushed to the server (shown green)
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun KeymapPanel(
     transport: UdpTransport,
@@ -81,10 +85,12 @@ fun KeymapPanel(
             .background(PitWall.Ground)
             .padding(12.dp),
     ) {
-        Row(
+        // FlowRow, not Row: five chips plus the title need ~680 dp, so on a 640 dp-wide landscape
+        // phone a plain Row pushed DONE and DISCONNECT off the right edge with no way to reach them.
+        FlowRow(
             Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(
                 "SETTINGS & SENSITIVITY",
@@ -92,8 +98,8 @@ fun KeymapPanel(
                 fontSize = 15.sp,
                 letterSpacing = 1.2.sp,
                 fontWeight = FontWeight.Bold,
+                modifier = Modifier.align(Alignment.CenterVertically),
             )
-            Spacer(Modifier.weight(1f))
             ChipLabel(
                 if (mode == "gyro") "MODE: GYRO" else "MODE: WHEEL",
                 if (mode == "gyro") PitWall.SignalGreen else PitWall.Indigo,
@@ -259,9 +265,13 @@ private fun KeyPicker(action: String, current: String, onPick: (String) -> Unit,
 internal fun ChipLabel(text: String, color: androidx.compose.ui.graphics.Color, onClick: () -> Unit) {
     Box(
         modifier = Modifier
+            // 12sp text plus 6 dp of padding is a 26 dp-tall tap target. The layout editor refuses to
+            // let a deck control get that small, so the settings chips do not get to either.
+            .heightIn(min = LayoutEdit.MIN_TOUCH_DP.dp)
             .border(1.dp, color.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 6.dp),
+        contentAlignment = Alignment.Center,
     ) { Text(text, color = color, fontSize = 12.sp, letterSpacing = 1.sp) }
 }
 

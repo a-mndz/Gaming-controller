@@ -60,15 +60,18 @@ object TruckKeys {
         "ENGINE" to "E", "GEAR_UP" to "Shift", "GEAR_DN" to "Ctrl",
     )
 
-    /** Everything the server's VkLookup can press. */
+    /** Everything the server's VkLookup can press. Anything absent here it would refuse anyway. */
     val keyChoices = run {
         val specials = listOf(
             "Space", "Enter", "Shift", "Ctrl", "Alt", "Tab", "Backspace", "Esc",
             "Up", "Down", "Left", "Right",
         )
+        // ETS2's stock indicators are [ and ], so the picker has to offer them or the shipped
+        // defaults become the one binding a user can look at but never restore.
+        val punctuation = listOf("[", "]", ";", "'", ",", ".", "/", "\\", "-", "=", "`")
         val letters = ('A'..'Z').map { it.toString() }
         val digits = ('0'..'9').map { it.toString() }
         val fkeys = (1..12).map { "F$it" }
-        letters + digits + specials + fkeys
+        letters + digits + punctuation + specials + fkeys
     }
 }

@@ -23,6 +23,7 @@ public sealed class EuroPadServer : IAsyncDisposable
 
     private bool _pinEnabled;
     private int _pin;
+    private readonly PinThrottle _pins = new();
 
     private readonly bool _rumbleTrace = Environment.GetEnvironmentVariable("EUROPAD_RUMBLE_TRACE") == "1";
 
@@ -266,11 +267,11 @@ public sealed class EuroPadServer : IAsyncDisposable
             return;
         }
 
-        if (slots.IsPinLocked(remote, now)) return;
+        if (_pins.IsLocked(remote, now)) return;
 
         if (_pinEnabled && frame.Pin != _pin)
         {
-            slots.RecordPinFail(remote, now);
+            _pins.RecordFail(remote, now);
             SendReject(Proto.RejectWrongPin, remote, socket);
             return;
         }
@@ -282,7 +283,7 @@ public sealed class EuroPadServer : IAsyncDisposable
             return;
         }
 
-        slots.ClearPinFails(remote);
+        _pins.Clear(remote);
         slot.LastPacketTicks = now;
         Console.WriteLine($"Phone connected -> slot {slot.Slot} (P{slot.Slot + 1}) from {remote}");
         SendAck(slot.Slot, remote, socket);
@@ -329,14 +330,15 @@ public sealed class EuroPadServer : IAsyncDisposable
             Console.WriteLine($"Slot {slot.Slot} (P{slot.Slot + 1}): link recovered");
         }
 
-        var pad = slot.Pad;
-        if (pad is null) return;
-
         bool axesChanged = !frame.Axes.AsSpan().SequenceEqual(slot.PrevAxes);
         bool loChanged = frame.ButtonsLoRaw != slot.ButtonsLoPrev;
         bool hiChanged = frame.ButtonsHiRaw != slot.ButtonsHiPrev;
 
-        if (loChanged || axesChanged)
+        // Keyboard output bypasses ViGEm entirely, so a slot whose pad failed to allocate must still
+        // fire the ETS2 keys — and must still advance its prev-state, or every later frame re-diffs
+        // against a snapshot from before the pad died.
+        var pad = slot.Pad;
+        if (pad is not null && (loChanged || axesChanged))
         {
             if (loChanged) pad.SetButtonsFull(X360Mapper.ButtonsLoToXusbMask(frame.ButtonsLoRaw));
             if (axesChanged)
@@ -377,6 +379,9 @@ public sealed class EuroPadServer : IAsyncDisposable
                 if (!slot.FailsafeEngaged && now - slot.LastPacketTicks > Proto.FailsafeMs)
                 {
                     slot.FailsafeEngaged = true;
+                    // Captured before the clear: releasing exactly what *this* slot held is what
+                    // keeps one phone's failsafe from dropping another phone's held horn or gear key.
+                    ushort heldHi = slot.ButtonsHiPrev;
                     slot.ButtonsLoPrev = 0;
                     slot.ButtonsHiPrev = 0;
                     Array.Clear(slot.PrevAxes);
@@ -387,7 +392,7 @@ public sealed class EuroPadServer : IAsyncDisposable
                         pad.ResetReport();
                         pad.SubmitReport();
                     }
-                    _keyboard.ReleaseAll(_profiles!.ActiveKeysByBit);
+                    _keyboard.Apply(_profiles!.ActiveKeysByBit, heldHi, 0);
                     Console.WriteLine($"Slot {slot.Slot} (P{slot.Slot + 1}): FAILSAFE - {Proto.FailsafeMs}ms silence, inputs neutralized");
                 }
 

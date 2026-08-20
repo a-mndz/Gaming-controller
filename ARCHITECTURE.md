@@ -24,7 +24,7 @@
                                                   │      └──► MediaKeyEmulator (SendInput, ph4)
                                                   │                              │
                                                   │  ProfileManager (hot-reload JSON)
-                                                  │  FailsafeTimer (300ms)       │
+                                                  │  FailsafeTimer (800ms)       │
                                                   │  Tray icon (WinForms-lite)   │
                                                   └──────────┬───────────────────┘
                                                              ▼
@@ -123,7 +123,7 @@ Axis index mapping is per-deck (the phone encodes its UI into the canonical axis
 - **PadEmulator**: wraps ViGEmClient `Xbox360Controller` per slot; pushes XINPUT_GAMEPAD state only on change. Registers the ViGEm rumble notification callback per pad (`vigem_target_x360_register_notification`).
 - **RumbleRelay**: rumble callback → rate-limit (≤30 frames/s, coalescing) → feedback frame (flags bit3) to that phone's active transport. Per-slot independent: game rumbles pad 2 → only phone 2 vibrates.
 - **KeyboardEmulator**: `SendInput` batched per tick; key codes from active profile; press = key-down, release = key-up; toggles (indicators/hazard) = one press per state flip.
-- **FailsafeTimer**: per-slot; last-packet timestamp; on 300ms expiry → neutral frame.
+- **FailsafeTimer**: per-slot; last-packet timestamp; on `Proto.FailsafeMs` (800 ms) expiry, neutral frame.
 - **ProfileManager**: watches `%APPDATA%\EuroPad\profiles\`; on file change → validate + swap atomically (no lock during swap).
 - **Tray**: minimal WinForms tray app — connected slots (1–4), each slot's RTT, "Open profiles", "Copy pairing QR", "Exit".
 
@@ -191,7 +191,7 @@ Latency budget (verified targets): phone capture ~2ms, encode ~0.1ms, LAN hop 2�
 | Malformed / bad-magic packet | drop, increment counter, stay silent |
 | Version mismatch | REJECT frame, reason 1 (client shows expected protocol version from its own frame) |
 | Stale seq | drop (idempotent — snapshot is full state) |
-| 300ms silence | failsafe neutral input; HUD on phone shows LINK LOST |
+| 800ms silence | failsafe neutral input; HUD on phone shows LINK LOST |
 | Phone app killed | same as silence; server slot freed after 2s for reuse |
 | PIN wrong (3 tries) | that phone's endpoint (source IP) locked out for 60 s (lockout occurs before any slot is allocated) |
 | 5th phone connects | REJECT `LOBBY_FULL` (XInput max 4); phone shows friendly message |

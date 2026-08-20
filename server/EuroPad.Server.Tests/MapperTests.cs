@@ -78,11 +78,11 @@ public class KeyboardEmulatorTests
     {
         var kb = Make();
         var keys = new byte[16];
-        keys[0] = (byte)'[';
+        keys[0] = 0xDB;
 
         kb.Apply(keys, 0, 1);
         kb.Apply(keys, 1, 0);
-        Assert.Equal(new List<(ushort, bool)> { ((ushort)'[', true), ((ushort)'[', false) }, _events);
+        Assert.Equal(new List<(ushort, bool)> { (0xDB, true), (0xDB, false) }, _events);
     }
 
     [Fact]
@@ -108,14 +108,18 @@ public class KeyboardEmulatorTests
     }
 
     [Fact]
-    public void ReleaseAll_ReleasesMappedKeysOnly()
+    public void Apply_ToZero_ReleasesOnlyTheKeysThatSlotHeld()
     {
+        // Failsafe path. A blind release of every mapped key used to drop keys a *different* slot
+        // was still holding, so the release set must come from this slot's own held word.
         var kb = Make();
         var keys = new byte[16];
-        keys[0] = (byte)'[';
+        keys[0] = 0xDB;
+        keys[3] = (byte)'H';
         keys[14] = 0x10;
 
-        kb.ReleaseAll(keys);
-        Assert.Equal(new List<(ushort, bool)> { ((ushort)'[', false), (0x10, false) }, _events);
+        ushort held = (ushort)((1 << 0) | (1 << 14));
+        kb.Apply(keys, held, 0);
+        Assert.Equal(new List<(ushort, bool)> { (0xDB, false), (0x10, false) }, _events);
     }
 }

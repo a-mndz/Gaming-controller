@@ -196,7 +196,7 @@ because that never crosses the air. Filters are specified as time constants, so 
 | What | Path (relative to the repo root) |
 |---|---|
 | Build + deploy script | `build-and-deploy.ps1` |
-| Install-now phone build | `EuroPad-Mobile.apk` · `EuroPad-Mobile.aab` (tracked snapshots — refresh before committing) |
+| Install-now phone build | `EuroPad-Mobile.apk` · `EuroPad-Mobile.aab` (tracked snapshots — the script refreshes the APK every run, the AAB on `-Bundle`) |
 | Android sources | `app/app/src/main/java/com/europad/app/` |
 | Gradle project root | `app/` — that is the `-p` argument; `app/app` is the module, hence `:app:` tasks |
 | Freshly built APK | `app/app/build/outputs/apk/debug/app-debug.apk` |
@@ -263,12 +263,20 @@ Nicer, one-time: run `& $gradle -p app wrapper --gradle-version 8.9` once. That 
 
 ### Refreshing the root snapshots
 
-`EuroPad-Mobile.apk` / `.aab` are committed so anyone can install without building. **Copy the fresh
-build over them before you commit**, or people install a stale one. Note that
-`build-and-deploy.ps1` builds the APK only, so add `:app:bundleDebug` above if you want the AAB current:
+`EuroPad-Mobile.apk` / `.aab` are committed so anyone can install without building. The script keeps
+them current for you: every `.\build-and-deploy.ps1` run copies the fresh APK over
+`EuroPad-Mobile.apk`, and `-Bundle` also builds the Play-format bundle and copies that:
 
 ```powershell
 cd "C:\Users\amand\Downloads\controller euro"
+.\build-and-deploy.ps1 -SkipServer -Bundle
+```
+
+Run that before you commit, so both snapshots describe the same build. Without `-Bundle` the summary
+table prints the `.aab` as `STALE` when it is older than the APK just built, so you will notice.
+`-NoCopy` leaves both root files alone. By hand, if you would rather:
+
+```powershell
 Copy-Item app\app\build\outputs\apk\debug\app-debug.apk EuroPad-Mobile.apk -Force
 Copy-Item app\app\build\outputs\bundle\debug\app-debug.aab EuroPad-Mobile.aab -Force
 ```

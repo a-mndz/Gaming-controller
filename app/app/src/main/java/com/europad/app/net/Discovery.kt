@@ -21,7 +21,7 @@ class EuroPadDiscovery(private val context: Context) {
     val hosts: StateFlow<Map<String, DiscoveredHost>> = _hosts
 
     private var listener: NsdManager.DiscoveryListener? = null
-    private var resolvingCount = 0
+    private val resolving = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     fun start() {
         if (listener != null) return
@@ -53,27 +53,35 @@ class EuroPadDiscovery(private val context: Context) {
     fun stop() {
         try { multicastLock?.takeIf { it.isHeld }?.release() } catch (_: Exception) { }
         multicastLock = null
+        // A resolve whose callback never arrives would otherwise still be "in flight" next time the
+        // picker opens, permanently hiding that host.
+        resolving.clear()
         val l = listener ?: return
         listener = null
         try { nsdManager.stopServiceDiscovery(l) } catch (_: Exception) { }
     }
 
+    /**
+     * One resolve in flight *per service name*, not one globally.
+     *
+     * The old gate was a single counter reset by whichever callback came back first: NSD delivers
+     * these on binder threads, so two hosts announcing together raced it, and any callback the
+     * framework never delivered left the counter stuck above zero — discovery then ignored every
+     * later onServiceFound for the life of the picker. Keying on the service name also stops a
+     * multi-PC LAN from surfacing only whichever server answered first.
+     */
+    @Suppress("DEPRECATION") // resolveService/host: registerServiceInfoCallback is API 34, minSdk is 29
     private fun resolve(info: NsdServiceInfo) {
-        if (resolvingCount > 0) return
-        resolvingCount++
+        val name = info.serviceName ?: return
+        if (!resolving.add(name)) return
         nsdManager.resolveService(info, object : NsdManager.ResolveListener {
             override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
-                resolvingCount = 0
+                resolving.remove(name)
             }
             override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
-                resolvingCount = 0
-                val addr = serviceInfo.host ?: return@onServiceResolved
-                val hostInfo = DiscoveredHost(
-                    serviceInfo.serviceName,
-                    addr.hostAddress ?: return@onServiceResolved,
-                    serviceInfo.port,
-                )
-                _hosts.value = _hosts.value + (serviceInfo.serviceName to hostInfo)
+                resolving.remove(name)
+                val host = serviceInfo.host?.hostAddress ?: return
+                _hosts.value = _hosts.value + (name to DiscoveredHost(name, host, serviceInfo.port))
             }
         })
     }

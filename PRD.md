@@ -22,7 +22,7 @@ Phone app (Android) + PC server (Windows). Server emulates virtual Xbox 360 cont
 | FR-1.7 | Optional PIN gate on first connection (4-digit, server-generated). | C |
 | FR-1.8 | Live connection HUD on phone: RTT ms, packet loss %, transport icon, current mode. | M |
 | FR-1.9 | Auto transport suggestion: if RTT stays above the deck's budget (120 Hz decks: >20 ms; 240 Hz decks: >15 ms) for 3 s, banner suggests USB or 5 GHz. | C |
-| FR-1.10 | Liveness: phone sends the RTT ping frame from FR-3.4 at 100 ms cadence when idle (dual purpose: keepalive + RTT sample). Phone: >1 s silence from server → full reconnect. Server: **>300 ms silence from phone → failsafe neutral inputs** (FR-2.6); received pings refresh this timer, so failsafe fires only on genuine link loss or app death. | M |
+| FR-1.10 | Liveness: phone sends the RTT ping frame from FR-3.4 at 100 ms cadence when idle (dual purpose: keepalive + RTT sample). Phone: >1 s silence from server → full reconnect. Server: **>800 ms silence from phone → failsafe neutral inputs** (FR-2.6); received pings refresh this timer, so failsafe fires only on genuine link loss or app death. | M |
 
 ### FR-2 Emulation (server)
 
@@ -33,7 +33,7 @@ Phone app (Android) + PC server (Windows). Server emulates virtual Xbox 360 cont
 | FR-2.3 | Keyboard output via SendInput for keys not on a pad (indicators, horn, hazards, any mapped key). | M |
 | FR-2.4 | Button edge detection: server computes pressed/released/held from snapshot diffs → keys are pressed once, released once. | M |
 | FR-2.5 | Supports up to **4 simultaneous phones → pads 1–4** (XInput slot 0–3). Server assigns the lowest free slot on HELLO; slot shown in phone HUD. Slots beyond 4 are refused with a clear "lobby full" error. | M |
-| FR-2.6 | Failsafe: no packet for 300ms → all buttons up, triggers 0, sticks centered, pad stays connected. | M |
+| FR-2.6 | Failsafe: no packet for `Proto.FailsafeMs` (800 ms) → all buttons up, triggers 0, sticks centered, pad stays connected. Was 300 ms; raised 2026-08-18 because a Wi-Fi retransmit burst tripped it and centred the wheel mid-corner. | M |
 | FR-2.7 | Tray icon on PC: status, connected phones, latency, open profiles folder, **copy pairing QR**, exit. | C |
 | FR-2.8 | Profiles folder of JSON files; server hot-reloads on change (no restart needed). | M |
 | FR-2.9 | Per-slot independence: each phone runs its own deck, profile binding, RTT, failsafe timer; one phone disconnecting never disturbs the others. | M |
@@ -179,7 +179,7 @@ Verified default keys (ETS2 keyboard defaults):
 1. `EuroPadServer.exe` running on PC, virtual Xbox 360 pad appears in Windows (`joy.cpl`) and in Steam controller settings.
 2. Phone connects over Wi-Fi without manual IP (mDNS).
 3. Gamepad deck drives all X360 inputs live in a Steam game.
-4. Kill Wi-Fi → failsafe triggers ≤300ms, pad inputs neutralized.
+4. Kill Wi-Fi → failsafe triggers ≤800ms, pad inputs neutralized.
 5. HUD shows RTT and transport.
 
 **Phase 2 (Truck + Haptics)** — all true:

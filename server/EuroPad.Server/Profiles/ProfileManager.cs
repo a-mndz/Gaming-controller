@@ -252,8 +252,18 @@ public static class VkLookup
         ["F6"] = 0x75, ["F7"] = 0x76, ["F8"] = 0x77, ["F9"] = 0x78, ["F10"] = 0x79,
         ["F11"] = 0x7A, ["F12"] = 0x7B, ["MediaPlayPause"] = 0xB3, ["MediaStop"] = 0xB2,
         ["MediaNext"] = 0xB0, ["MediaPrev"] = 0xB1, ["VolumeUp"] = 0xAF, ["VolumeDown"] = 0xAE, ["Mute"] = 0xAD,
+        // US-layout VK_OEM_*. Punctuation has no ASCII/VK identity: (byte)'[' is 0x5B = VK_LWIN and
+        // (byte)']' is 0x5D = VK_APPS, so the stock ETS2 indicators used to open the Start menu and
+        // the context menu instead of signalling. Same trap for every other symbol below.
+        ["-"] = 0xBD, ["="] = 0xBB, ["["] = 0xDB, ["]"] = 0xDD, ["\\"] = 0xDC,
+        [";"] = 0xBA, ["'"] = 0xDE, [","] = 0xBC, ["."] = 0xBE, ["/"] = 0xBF, ["`"] = 0xC0,
     };
 
+    /// <summary>
+    /// Only letters, digits and the names above resolve. Anything else is rejected rather than
+    /// coerced: an unknown name that silently became some unrelated VK is how a keymap ends up
+    /// pressing Windows keys mid-drive, and SetBitKey uses this as its validation gate.
+    /// </summary>
     public static bool TryGet(string key, out byte vk)
     {
         if (Map.TryGetValue(key, out vk)) return true;
@@ -261,8 +271,6 @@ public static class VkLookup
         {
             char c = char.ToUpperInvariant(key[0]);
             if (c is >= 'A' and <= 'Z' or >= '0' and <= '9') { vk = (byte)c; return true; }
-            vk = (byte)key[0];
-            return vk >= 0x20;
         }
         vk = 0;
         return false;

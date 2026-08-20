@@ -3,8 +3,9 @@
 #
 # Deliberately TRACKED despite looking like artifacts (do not add these):
 #   build-and-deploy.ps1     the one supported build/deploy entry point (source, not output)
-#   EuroPad-Mobile.apk       install-now snapshot; REFRESH IT before you commit, see README
-#   EuroPad-Mobile.aab       Play-format snapshot of the same build
+#   EuroPad-Mobile.apk       install-now snapshot; refreshed by every build-and-deploy.ps1 run
+#   EuroPad-Mobile.aab       Play-format snapshot of the same build; needs -Bundle to refresh,
+#                            so run ".\build-and-deploy.ps1 -Bundle" before you commit
 # ---------------------------------------------------------------------------
 
 # .NET build artifacts

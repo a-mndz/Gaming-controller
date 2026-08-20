@@ -9,13 +9,15 @@ object Proto {
     const val AXES_COUNT = 8
     const val DEFAULT_PORT = 47910
 
-    const val FLAG_PING_REQUEST: Byte = 1 shl 0
-    const val FLAG_PING_REPLY: Byte = 1 shl 1
-    const val FLAG_HELLO: Byte = 1 shl 2
-    const val FLAG_RUMBLE: Byte = 1 shl 3
-    const val FLAG_ACK: Byte = 1 shl 4
-    const val FLAG_REJECT: Byte = 1 shl 5
-    const val FLAG_CONFIG: Byte = 1 shl 6
+    // Written as literals, not `1 shl n`: a Byte-typed shl expression is an Int today and Kotlin has
+    // announced it will stop silently narrowing, which would break the build on a compiler bump.
+    const val FLAG_PING_REQUEST: Byte = 0x01
+    const val FLAG_PING_REPLY: Byte = 0x02
+    const val FLAG_HELLO: Byte = 0x04
+    const val FLAG_RUMBLE: Byte = 0x08
+    const val FLAG_ACK: Byte = 0x10
+    const val FLAG_REJECT: Byte = 0x20
+    const val FLAG_CONFIG: Byte = 0x40
 
     const val CFG_SET_BIT_KEY: Byte = 1
 

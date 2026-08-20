@@ -46,6 +46,7 @@ class UdpTransport(
 
     private val stateRef = AtomicReference(ConnState.Idle)
     private val assignedSlot = AtomicLong(-1)
+    private val rejectRef = AtomicLong(0)
     private val pendingPingTs = AtomicLong(-1)
     private val pendingSentAt = AtomicLong(0)
     private val lastRxAt = AtomicLong(0)
@@ -61,6 +62,15 @@ class UdpTransport(
 
     val state: ConnState get() = stateRef.get()
     val slot: Int get() = assignedSlot.get().toInt()
+
+    /**
+     * Reason byte from the last REJECT (`Proto.REJECT_*`), 0 if none.
+     *
+     * The server already says whether it was the PIN, a full lobby or a protocol mismatch; the frame
+     * used to be logged and dropped, which left the only user-visible outcome "connection failed" —
+     * indistinguishable from a wrong IP, and unactionable for the one cause the user can fix.
+     */
+    val rejectReason: Int get() = rejectRef.get().toInt()
     val rtt: Long get() = stats.medianRttMs
     val lossPercent: Int get() = stats.lossPercent
     val serverHost: String get() = hostLabel
@@ -69,6 +79,7 @@ class UdpTransport(
     fun connect(host: String, port: Int, pin: Int): ConnState {
         close()
         this.pin = pin
+        rejectRef.set(0)
         return try {
             val addr = InetSocketAddress(host, port)
             val sock = DatagramSocket()
@@ -187,7 +198,9 @@ class UdpTransport(
                     ackLatch?.countDown()
                 }
                 flags and Proto.FLAG_REJECT.toInt() != 0 -> {
-                    Log.d("EuroPadUDP", "rx REJECT reason=${buf[Proto.OFF_BUTTONS_LO].toInt() and 0xFF}")
+                    val reason = buf[Proto.OFF_BUTTONS_LO].toInt() and 0xFF
+                    Log.d("EuroPadUDP", "rx REJECT reason=$reason")
+                    rejectRef.set(reason.toLong())
                     stateRef.set(ConnState.Rejected)
                     ackLatch?.countDown()
                 }
