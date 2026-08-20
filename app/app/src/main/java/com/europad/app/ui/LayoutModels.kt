@@ -145,6 +145,19 @@ object LayoutEdit {
     /** The editor's warning test: a real collision, not two controls sharing an edge. */
     fun collides(a: DeckRect, b: DeckRect): Boolean =
         overlapFraction(a, b) >= OVERLAP_WARN_FRACTION
+
+    /**
+     * How far past the element's bottom-right corner the resize grab box is pushed, so that a
+     * [grabDp]-wide box ends up *centred on the corner* — half of it outside the element.
+     *
+     * The grab box is a child of the drag box, so it wins hit-testing everywhere it covers: every
+     * dp of it that lies inside the element is a dp you cannot grab to move. Centring it is the
+     * most it can be pushed out while still being reachable from inside the element.
+     */
+    fun cornerGrabOutsetDp(grabDp: Float = MIN_TOUCH_DP): Float = grabDp / 2f
+
+    /** The side of the element's own interior that grab box eats. See [cornerGrabOutsetDp]. */
+    fun cornerGrabInsideDp(grabDp: Float = MIN_TOUCH_DP): Float = grabDp - cornerGrabOutsetDp(grabDp)
 }
 
 /**

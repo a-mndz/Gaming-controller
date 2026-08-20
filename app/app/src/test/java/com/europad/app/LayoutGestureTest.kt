@@ -203,6 +203,35 @@ class LayoutGestureTest {
     }
 
     // ========================================================================
+    // The resize corner must not eat the move target
+    // ========================================================================
+
+    /**
+     * The grab box for the resize corner is a child of the drag box, so it wins hit-testing wherever
+     * it covers it: every dp of it inside the element is a dp you cannot grab to move. It used to be
+     * offset by `(44 - 22) / 2` = 11 dp, which centres nothing — the 44 dp box straddled 33 dp of the
+     * element and claimed the whole bottom-right of a utility button, so most grabs started a resize
+     * instead of a move. Centred on the corner it claims a quarter of the smallest element the editor
+     * allows, and less of anything bigger.
+     */
+    @Test
+    fun `the resize corner claims at most a quarter of the smallest element`() {
+        val grab = LayoutEdit.MIN_TOUCH_DP
+        val inside = LayoutEdit.cornerGrabInsideDp()
+
+        assertEquals("the box has to reach the corner from inside", grab, inside + LayoutEdit.cornerGrabOutsetDp(), 0.0001f)
+
+        // Worst case: an element squashed onto the 44 dp floor in both directions.
+        val claimed = (inside * inside) / (grab * grab)
+        assertTrue("corner claims $claimed of a floor-sized element", claimed <= 0.25f)
+
+        // A stock utility button on a 1080x2400 handset: 849x369 dp inner canvas.
+        val btn = DeckLayout.utilBtn(0, 849f / 369f)
+        val onButton = (inside * inside) / (btn.w * 849f * btn.h * 369f)
+        assertTrue("corner claims $onButton of a utility button", onButton <= 0.20f)
+    }
+
+    // ========================================================================
     // Overlap warning: real collisions only
     // ========================================================================
 

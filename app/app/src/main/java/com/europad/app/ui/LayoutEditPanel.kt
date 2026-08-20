@@ -3,7 +3,6 @@ package com.europad.app.ui
 import android.content.SharedPreferences
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -13,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
@@ -28,8 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.graphics.PathEffect
-import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalDensity
@@ -110,18 +109,38 @@ fun LayoutEditOverlay(
         Modifier
             .fillMaxSize()
             .background(PitWall.Ground.copy(alpha = 0.2f))
-            // Pointer sink: children (handles, chips) hit-test above this, everything else — the
-            // live deck underneath — gets nothing.
+            // Blocks the live deck underneath *and* deselects on a tap on bare canvas — one handler,
+            // because the two cannot be separated.
+            //
+            // This used to be an unconditional sink that consumed every change on the Main pass, plus
+            // a `detectTapGestures` for the deselect. That combination silently broke every tap in the
+            // editor. Compose runs the *whole* Main walk of an event before the Final walk, and every
+            // tap detector — `detectTapGestures`, and so `clickable` and the SAVE/RESET/CANCEL chips —
+            // ends its wait with `waitForUpOrCancellation`, which treats any consumption it sees on
+            // Final as "someone else took this gesture, give up". So the sink's own consumption, from
+            // an ancestor, cancelled the taps of its descendants: a real finger emits move events
+            // between press and release, each one got consumed, and the tap was abandoned before the
+            // release arrived. Tap-to-select never fired, which is why a control could never be
+            // selected without nudging it (the drag detector reads the Main pass, so it was immune)
+            // and why the resize corner — which only exists on a selected control — looked missing.
+            //
+            // A press has already passed every descendant by the time it reaches here, so consuming
+            // only the gestures that nobody above claimed keeps the deck quiet without touching the
+            // ones the editor needs.
             .pointerInput(Unit) {
                 awaitPointerEventScope {
-                    while (true) awaitPointerEvent().changes.forEach { it.consume() }
+                    var claimed = false
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        if (event.type == PointerEventType.Press) {
+                            claimed = event.changes.any { it.isConsumed }
+                            if (!claimed) selected = null
+                        }
+                        if (!claimed) event.changes.forEach { it.consume() }
+                        if (event.changes.none { it.pressed }) claimed = false
+                    }
                 }
-            }
-            // Declared after the sink so it is the inner node and sees the Main pass first. A tap a
-            // handle already claimed never reaches it; a tap on bare canvas does, and clears the
-            // selection. That is the way back to the toolbar when a selected control is sitting on
-            // top of it — see the zIndex note in ElementHandle.
-            .pointerInput(Unit) { detectTapGestures { selected = null } },
+            },
     ) {
         baseline.forEach { (id, fallback) ->
             ElementHandle(
@@ -205,8 +224,18 @@ private val HANDLE_SIZE = 22.dp
  */
 private val HANDLE_HIT = LayoutEdit.MIN_TOUCH_DP.dp
 
-/** Pushes the hit box out until its centre lands on the corner, leaving the tab where it always was. */
-private val HANDLE_OUT = (HANDLE_HIT - HANDLE_SIZE) / 2
+/**
+ * Pushes the grab box out until its centre lands *on* the corner, so only its inner quarter overlaps
+ * the element.
+ *
+ * This was `(HANDLE_HIT - HANDLE_SIZE) / 2` — 11 dp, which is not the offset that centres anything;
+ * it left the 44 dp box straddling 33 dp of the element's own body. The grab box is a child of the
+ * drag box, so it wins hit-testing over it: on a utility button (~55×48 dp on a 1080p handset) that
+ * claimed the whole bottom-right 41% of the control, and every grab that landed there started a
+ * resize instead of a move. What was left to move by was a 22 dp strip — half the app's own touch
+ * floor. Centred, the box claims a 22 dp corner square and reaches 22 dp into open canvas.
+ */
+private val HANDLE_OUT = LayoutEdit.cornerGrabOutsetDp(LayoutEdit.MIN_TOUCH_DP).dp
 
 /**
  * One element's drag box + resize corner. Geometry comes from [placeOnDeck], so it is the same
@@ -256,24 +285,36 @@ private fun ElementHandle(
             .zIndex(if (isSelected) 3f else 0f)
             .placeOnDeck(pad, innerW, innerH) { pos().toDeckRect() }
             .drawBehind {
-                // Draw-phase read: an overlap flipping repaints the outline without recomposing.
-                val bad = overlaps()
-                drawRoundRect(
-                    color = when {
-                        bad -> PitWall.SignalRed
-                        isSelected -> PitWall.WheelGlow
-                        else -> PitWall.TowerGray
-                    },
-                    cornerRadius = CornerRadius(6.dp.toPx()),
-                    style = Stroke(
-                        width = if (isSelected || bad) 2.dp.toPx() else 1.dp.toPx(),
-                        pathEffect = PathEffect.dashPathEffect(
-                            floatArrayOf(6.dp.toPx(), 5.dp.toPx()),
-                        ),
-                    ),
-                )
+                // No outline. The controls themselves stay on screen while editing — they are their
+                // own boundary — so a dashed box around each of thirteen of them was noise, not
+                // information. What is left is the one thing the control cannot say by itself: a
+                // red wash when it overlaps a neighbour. Draw-phase read, so an overlap flipping
+                // repaints this handle and recomposes nothing.
+                if (overlaps()) {
+                    drawRoundRect(
+                        color = PitWall.SignalRed.copy(alpha = 0.22f),
+                        cornerRadius = CornerRadius(6.dp.toPx()),
+                    )
+                }
             }
-            .pointerInput(id) { detectTapGestures(onTap = { select() }) }
+            // Select on press, not on tap. A tap detector cannot survive in here: it confirms on the
+            // Final pass and abandons the gesture if anything consumed it, and something always does
+            // — see the note on the overlay's root. Pressing also reads better than tapping: the
+            // control is selected the moment you touch it, so the corner handle is already there when
+            // the finger that selected it lets go.
+            //
+            // Consuming the whole gesture keeps the real control underneath silent. Safe to do from
+            // here because both drag detectors sit closer to the tail (the move drag below) or in a
+            // child node (the resize corner), and the Main pass reaches those first.
+            .pointerInput(id) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        if (event.type == PointerEventType.Press) select()
+                        event.changes.forEach { it.consume() }
+                    }
+                }
+            }
             .pointerInput(id) {
                 // Anchor + running total for one move gesture. Unclamped on purpose: clamping the
                 // accumulator would make an edge swallow overshoot and stick.
@@ -302,7 +343,11 @@ private fun ElementHandle(
                 Modifier
                     .align(Alignment.BottomEnd)
                     .offset(x = HANDLE_OUT, y = HANDLE_OUT)
-                    .size(HANDLE_HIT)
+                    // requiredSize, not size: `size` honours the incoming constraints, and the drag
+                    // box's are fixed to the element. GEAR and INDICATORS are only ~31 dp tall, so
+                    // their resize target was squashed to 31 dp — under the floor it is there to
+                    // enforce, on the two controls that need it most.
+                    .requiredSize(HANDLE_HIT)
                     .pointerInput(id) {
                         // Snapshot at drag start and never re-read: `base` is both the fixed
                         // top-left anchor for the whole gesture and the seed for the running size.
@@ -441,7 +486,7 @@ private fun FirstTimeInstructionsDialog(
                 InstructionItem("Drag it anywhere on the deck")
                 InstructionItem("Drag the corner handle to resize (44 dp minimum)")
                 InstructionItem("Tap empty space to deselect — do this if a control covers the buttons below")
-                InstructionItem("A red dashed outline means it overlaps another control")
+                InstructionItem("A red tint means it overlaps another control")
                 InstructionItem("SAVE applies it to the deck straight away")
                 Text(
                     text = "Tip: outside the editor, long-press R/N/D to tell the app which gear the truck is really in.",
