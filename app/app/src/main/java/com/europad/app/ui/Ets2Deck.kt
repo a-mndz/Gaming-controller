@@ -399,22 +399,39 @@ fun TruckDeck2(
         val editBaseline = remember(defaultPositions, customPositions) {
             defaultPositions + (customPositions ?: emptyMap()).filterKeys { it in defaultPositions }
         }
-        // null = nothing edited yet, so entering the editor shows the saved layout on the first
-        // frame and RESET/CANCEL is just "forget the edits".
-        var editPositions by remember { mutableStateOf<Map<String, ElementPosition>?>(null) }
-        // Mirrors `editPositions != null`. It exists so nothing reads `editPositions` itself during
-        // composition: a drag writes that state on every pointer event, and one composition-time
+        // One state per element, not one map for all of them. A drag writes ~120 times a second, and
+        // every control's placement read the same map object, so a single finger re-measured and
+        // repainted the whole deck — wheel canvas, both pedals, six buttons, gear selector, link strip
+        // — on every event. That is what made a drag arrive in visible steps. Per element, dragging one
+        // control does layout work for exactly that control.
+        //
+        // Keyed on editBaseline, so SAVE and RESET (which rebuild it) also drop the stale edits.
+        val editSlots = remember(editBaseline) {
+            editBaseline.keys.associateWith { mutableStateOf<ElementPosition?>(null) }
+        }
+        // Mirrors "some slot is non-null" for composition-time readers, so nothing has to read a slot
+        // during composition: a drag writes one on every pointer event, and one composition-time
         // reader is enough to drag the whole deck through a recomposition each time.
         var hasEdits by remember { mutableStateOf(false) }
-        // Read in the layout and draw phases only — see placeOnDeck.
-        val live = { editPositions ?: editBaseline }
+        fun clearEdits() {
+            editSlots.values.forEach { it.value = null }
+            hasEdits = false
+        }
 
-        /** Editing shows the in-progress map, so the live deck moves with the handles. */
-        fun place(id: String, default: DeckRect): Modifier =
-            Modifier.placeOnDeck(pad, innerW, innerH) {
-                val r = if (showEditLayout) live()[id] else customPositions?.get(id)
+        /** Every element's live position. Reads all of the slots, so keep it out of per-event paths. */
+        fun snapshot() = editBaseline.mapValues { (id, saved) -> editSlots[id]?.value ?: saved }
+
+        /**
+         * Editing shows the in-progress position, so the live deck moves with the handles. Reads this
+         * one element's slot and nothing else — see placeOnDeck for why it is a layout-phase read.
+         */
+        fun place(id: String, default: DeckRect): Modifier {
+            val slot = editSlots[id]
+            return Modifier.placeOnDeck(pad, innerW, innerH) {
+                val r = if (showEditLayout) (slot?.value ?: editBaseline[id]) else customPositions?.get(id)
                 r?.toDeckRect() ?: default
             }
+        }
 
         UtilButton(
             label = "LIGHTS", description = "pad:LIGHTS", tint = PitWall.ButtonLabel,
@@ -519,25 +536,25 @@ fun TruckDeck2(
             LayoutEditOverlay(
                 prefs = prefs,
                 mode = mode,
-                baseline = editBaseline,
-                live = live,
+                ids = editBaseline.keys,
+                positionOf = { id -> editSlots[id]?.value ?: editBaseline.getValue(id) },
                 pad = pad,
                 innerW = innerW,
                 innerH = innerH,
                 hasChanges = hasEdits,
-                // Reads the state, not a composition snapshot: drag events land between frames, so
-                // a captured map would be one or more edits behind.
+                // Writes the element's own state, not a merged map: drag events land between frames, so
+                // a captured map would be one or more edits behind, and rebuilding a fourteen-entry map
+                // per event invalidated every control instead of the one being dragged.
                 onChange = { id, p ->
-                    editPositions = (editPositions ?: editBaseline) + (id to p)
+                    editSlots[id]?.value = p
                     hasEdits = true
                 },
                 onSave = {
                     tick()
-                    val saved = live()
+                    val saved = snapshot()
                     LayoutPreferences.save(prefs, mode, saved)
                     customPositions = saved
-                    editPositions = null
-                    hasEdits = false
+                    clearEdits()
                     showEditLayout = false
                 },
                 onReset = {
@@ -545,13 +562,11 @@ fun TruckDeck2(
                     tick()
                     LayoutPreferences.clear(prefs, mode)
                     customPositions = null
-                    editPositions = null
-                    hasEdits = false
+                    clearEdits()
                 },
                 onCancel = {
                     tick()
-                    editPositions = null
-                    hasEdits = false
+                    clearEdits()
                     showEditLayout = false
                 },
             )

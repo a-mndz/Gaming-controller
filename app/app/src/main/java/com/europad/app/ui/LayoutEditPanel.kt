@@ -2,7 +2,8 @@ package com.europad.app.ui
 
 import android.content.SharedPreferences
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -12,7 +13,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
@@ -28,7 +28,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalDensity
@@ -80,18 +83,21 @@ internal fun Modifier.placeOnDeck(pad: Dp, innerW: Dp, innerH: Dp, rect: () -> D
  * also swallows every pointer event, so the real controls never fire while editing — no per-control
  * edit flag needed.
  *
- * @param baseline every element the deck draws, at its saved position. Supplies the id set (which
- *   never changes mid-session) and the fallback for an id [live] has no entry for.
- * @param live the in-progress edit map. A lambda, not a value: it is read in the layout and draw
- *   phases only, so a drag never recomposes this overlay or the deck (see [placeOnDeck]).
+ * @param ids every element the deck draws. Fixed for the session; its iteration order is the
+ *   handles' draw order.
+ * @param positionOf one element's live position — its in-progress edit if it has one, else its
+ *   saved position. A lambda rather than a map, and per element rather than for all of them: it is
+ *   read in the layout and draw phases only, so a drag never recomposes this overlay or the deck
+ *   (see [placeOnDeck]), and it touches only the dragged element's state, so the other thirteen
+ *   controls do not re-measure and repaint on every pointer event.
  * @param onChange called with the new position of one element, live during a drag
  */
 @Composable
 fun LayoutEditOverlay(
     prefs: SharedPreferences,
     mode: String,
-    baseline: Map<String, ElementPosition>,
-    live: () -> Map<String, ElementPosition>,
+    ids: Set<String>,
+    positionOf: (String) -> ElementPosition,
     pad: Dp,
     innerW: Dp,
     innerH: Dp,
@@ -142,14 +148,13 @@ fun LayoutEditOverlay(
                 }
             },
     ) {
-        baseline.forEach { (id, fallback) ->
+        ids.forEach { id ->
             ElementHandle(
                 id = id,
-                position = { live()[id] ?: fallback },
+                position = { positionOf(id) },
                 overlaps = {
-                    val all = live()
-                    val r = (all[id] ?: fallback).toDeckRect()
-                    all.any { (other, p) -> other != id && LayoutEdit.collides(r, p.toDeckRect()) }
+                    val r = positionOf(id).toDeckRect()
+                    ids.any { other -> other != id && LayoutEdit.collides(r, positionOf(other).toDeckRect()) }
                 },
                 pad = pad,
                 innerW = innerW,
@@ -157,6 +162,21 @@ fun LayoutEditOverlay(
                 isSelected = selected == id,
                 onSelect = { selected = id },
                 onChange = { onChange(id, it) },
+            )
+        }
+
+        // The resize grab is a sibling of the handles, not a child of the selected one. See
+        // [ResizeGrab] — as a child it was unreachable for most of its own visible area.
+        val sel = selected
+        if (sel != null && sel in ids) {
+            ResizeGrab(
+                id = sel,
+                position = { positionOf(sel) },
+                pad = pad,
+                innerW = innerW,
+                innerH = innerH,
+                onSelect = { selected = sel },
+                onChange = { onChange(sel, it) },
             )
         }
 
@@ -225,29 +245,29 @@ private val HANDLE_SIZE = 22.dp
 private val HANDLE_HIT = LayoutEdit.MIN_TOUCH_DP.dp
 
 /**
- * Pushes the grab box out until its centre lands *on* the corner, so only its inner quarter overlaps
- * the element.
+ * Half the grab box, which is also the distance its centre sits from the element's corner: the box
+ * straddles the corner, so it claims a 22 dp square of the element and reaches 22 dp into open
+ * canvas.
  *
  * This was `(HANDLE_HIT - HANDLE_SIZE) / 2` — 11 dp, which is not the offset that centres anything;
- * it left the 44 dp box straddling 33 dp of the element's own body. The grab box is a child of the
- * drag box, so it wins hit-testing over it: on a utility button (~55×48 dp on a 1080p handset) that
- * claimed the whole bottom-right 41% of the control, and every grab that landed there started a
- * resize instead of a move. What was left to move by was a 22 dp strip — half the app's own touch
- * floor. Centred, the box claims a 22 dp corner square and reaches 22 dp into open canvas.
+ * it left the 44 dp box straddling 33 dp of the element's own body. The grab wins hit-testing over
+ * the drag box, so on a utility button (~55×48 dp on a 1080p handset) that claimed the whole
+ * bottom-right 41% of the control and every grab that landed there resized instead of moving. What
+ * was left to move by was a 22 dp strip — half the app's own touch floor.
  */
 private val HANDLE_OUT = LayoutEdit.cornerGrabOutsetDp(LayoutEdit.MIN_TOUCH_DP).dp
 
 /**
- * One element's drag box + resize corner. Geometry comes from [placeOnDeck], so it is the same
- * rectangle the deck draws the control in.
+ * One element's drag box. The resize grab is [ResizeGrab], a sibling — it cannot live in here.
+ * Geometry comes from [placeOnDeck], so this is the same rectangle the deck draws the control in.
  *
  * Nothing here reads a position during composition. [position] and [overlaps] are read in the layout
  * and draw phases, so a drag re-measures and repaints this one handle and recomposes nothing at all —
- * the live size readout is its own composable for exactly that reason. Both gestures also accumulate
- * their own running total inside the pointer scope rather than re-reading the committed position on
- * each event: a position only refreshes between frames, so several `onDrag` callbacks in a row used to
- * see the same base and the last write won — the element crawled behind the finger and lost most of
- * the travel. A plain local `var` is immune to that: every delta lands exactly once.
+ * the live size readout is its own composable for exactly that reason. The drag also accumulates its
+ * own running total inside the pointer scope rather than re-reading the committed position on each
+ * event: a position only refreshes between frames, so several `onDrag` callbacks in a row used to see
+ * the same base and the last write won — the element crawled behind the finger and lost most of the
+ * travel. A plain local `var` is immune to that: every delta lands exactly once.
  */
 @Composable
 private fun ElementHandle(
@@ -261,7 +281,8 @@ private fun ElementHandle(
     onSelect: () -> Unit,
     onChange: (ElementPosition) -> Unit,
 ) {
-    // pointerInput(id) never restarts, so everything a gesture calls has to be reached through state.
+    // The gesture node never restarts (its key is just the id), so everything a gesture calls has to
+    // be reached through state.
     // A captured lambda keeps merging edits into the map from the composition that installed it —
     // RESET's fresh defaults would be silently thrown away by the next drag, and SAVE would write the
     // stale ones. Same for `pos`: after RESET the baseline map is a new instance.
@@ -297,93 +318,141 @@ private fun ElementHandle(
                     )
                 }
             }
-            // Select on press, not on tap. A tap detector cannot survive in here: it confirms on the
-            // Final pass and abandons the gesture if anything consumed it, and something always does
-            // — see the note on the overlay's root. Pressing also reads better than tapping: the
-            // control is selected the moment you touch it, so the corner handle is already there when
-            // the finger that selected it lets go.
+            // Select on press, not on tap, and move on the same gesture — one node owns both. A tap
+            // detector cannot survive in here: it confirms on the Final pass and abandons the gesture
+            // if anything consumed it, and something always does — see the note on the overlay's root.
+            // Pressing also reads better than tapping: the control is selected the moment you touch
+            // it, so the corner handle is already there when the finger that selected it lets go.
             //
-            // Consuming the whole gesture keeps the real control underneath silent. Safe to do from
-            // here because both drag detectors sit closer to the tail (the move drag below) or in a
-            // child node (the resize corner), and the Main pass reaches those first.
-            .pointerInput(id) {
-                awaitPointerEventScope {
+            // Select and drag were two `pointerInput` nodes in this chain before. The press-consumer
+            // ran, the drag detector never started a single coroutine — proven on device: its first
+            // line never logged while both of its neighbours logged every event. Two nodes splitting
+            // one gesture in one chain is the bug; one node that awaits its own events has nothing to
+            // race. No slop threshold either: inside the editor the only thing a press on a control
+            // can mean is "move me", so the first movement moves it.
+            //
+            // Consuming the whole gesture keeps the real control underneath silent.
+            .pointerInput("drag-$id") {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    down.consume()
+                    select()
+                    val base = pos()
+                    var liveCx = base.cx
+                    var liveCy = base.cy
+                    // Unclamped running total on purpose: clamping the accumulator would make an edge
+                    // swallow overshoot and stick.
                     while (true) {
                         val event = awaitPointerEvent()
-                        if (event.type == PointerEventType.Press) select()
-                        event.changes.forEach { it.consume() }
-                    }
-                }
-            }
-            .pointerInput(id) {
-                // Anchor + running total for one move gesture. Unclamped on purpose: clamping the
-                // accumulator would make an edge swallow overshoot and stick.
-                var base = pos()
-                var liveCx = base.cx
-                var liveCy = base.cy
-                detectDragGestures(
-                    onDragStart = {
-                        select()
-                        base = pos()
-                        liveCx = base.cx
-                        liveCy = base.cy
-                    },
-                    onDrag = { change, drag ->
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if (change.changedToUpIgnoreConsumed()) {
+                            change.consume()
+                            break
+                        }
+                        val drag = change.positionChange()
                         change.consume()
+                        if (drag == Offset.Zero) continue
                         liveCx += (drag.x / density) / canvasWDp
                         liveCy += (drag.y / density) / canvasHDp
                         emit(LayoutEdit.moved(base, liveCx, liveCy))
-                    },
-                )
+                    }
+                }
             },
     ) {
-        if (isSelected) {
-            SizeReadout(id, pos, innerW, innerH)
-            Box(
-                Modifier
-                    .align(Alignment.BottomEnd)
-                    .offset(x = HANDLE_OUT, y = HANDLE_OUT)
-                    // requiredSize, not size: `size` honours the incoming constraints, and the drag
-                    // box's are fixed to the element. GEAR and INDICATORS are only ~31 dp tall, so
-                    // their resize target was squashed to 31 dp — under the floor it is there to
-                    // enforce, on the two controls that need it most.
-                    .requiredSize(HANDLE_HIT)
-                    .pointerInput(id) {
-                        // Snapshot at drag start and never re-read: `base` is both the fixed
-                        // top-left anchor for the whole gesture and the seed for the running size.
-                        var base = pos()
-                        var liveW = base.w
-                        var liveH = base.h
-                        detectDragGestures(
-                            onDragStart = {
-                                base = pos()
-                                // Seed from the size actually on screen, not the stored one. GEAR
-                                // and INDICATORS are shorter than the 44 dp floor, so seeding raw
-                                // left the accumulator below what the first event snapped to and
-                                // the next ~12 dp of drag did nothing.
-                                val shown = LayoutEdit.resized(base, base.w, base.h, canvasWDp, canvasHDp)
-                                liveW = shown.w
-                                liveH = shown.h
-                            },
-                            onDrag = { change, drag ->
-                                change.consume()
-                                liveW += (drag.x / density) / canvasWDp
-                                liveH += (drag.y / density) / canvasHDp
-                                emit(LayoutEdit.resized(base, liveW, liveH, canvasWDp, canvasHDp))
-                            },
-                        )
-                    },
-                contentAlignment = Alignment.Center,
-            ) {
-                Box(
-                    Modifier
-                        .size(HANDLE_SIZE)
-                        .clip(RoundedCornerShape(50))
-                        .background(PitWall.WheelGlow.copy(alpha = 0.85f)),
-                    contentAlignment = Alignment.Center,
-                ) { Text("⤡", color = PitWall.Ink, fontSize = 12.sp) }
+        if (isSelected) SizeReadout(id, pos, innerW, innerH)
+    }
+}
+
+/**
+ * The resize grab for the selected element: a 44 dp target centred on its bottom-right corner.
+ *
+ * A sibling of the handles rather than a child of the selected one, and that is the entire fix. Once
+ * the box is centred on the corner, half of it — including the centre of the visible tab, which sits
+ * exactly *on* that corner — lies outside the element it belongs to. A child reaching past its
+ * parent's bounds is not an ordinary hit in Compose: the parent is out of bounds for that press, so
+ * the press is only offered to the child as a near miss. Aiming at the middle of the tab therefore
+ * missed, fell through to the overlay root, and the root deselects any press nobody claimed — which
+ * deleted the tab mid-press. "The handle appears, dragging it does nothing" is that, exactly.
+ *
+ * Out here every pixel of it is a plain in-bounds hit of the full-screen overlay, whatever the
+ * element's size, and zIndex 4 keeps it above the toolbar and above every handle including the
+ * selected one. It also can no longer be confused with a move: the element's drag box is not an
+ * ancestor of this node, so the two gestures never see the same pointer.
+ *
+ * [position] is read in the layout phase only, like [placeOnDeck]: a resize writes a new size on
+ * every pointer event and must not recompose anything.
+ */
+@Composable
+private fun ResizeGrab(
+    id: String,
+    position: () -> ElementPosition,
+    pad: Dp,
+    innerW: Dp,
+    innerH: Dp,
+    onSelect: () -> Unit,
+    onChange: (ElementPosition) -> Unit,
+) {
+    val pos by rememberUpdatedState(position)
+    val emit by rememberUpdatedState(onChange)
+    val select by rememberUpdatedState(onSelect)
+    val density = LocalDensity.current.density
+    val canvasWDp by rememberUpdatedState(innerW.value)
+    val canvasHDp by rememberUpdatedState(innerH.value)
+
+    Box(
+        Modifier
+            .zIndex(4f)
+            .offset {
+                val r = pos().toDeckRect()
+                IntOffset(
+                    (pad.toPx() + innerW.toPx() * r.right - HANDLE_OUT.toPx()).roundToInt(),
+                    (pad.toPx() + innerH.toPx() * r.bottom - HANDLE_OUT.toPx()).roundToInt(),
+                )
             }
-        }
+            .size(HANDLE_HIT)
+            // One node owns press-select and the resize drag, for the same reason the handle does:
+            // splitting them across two `pointerInput` nodes in one chain leaves the second one dead.
+            // It has to claim the press because the overlay root deselects any press no descendant
+            // consumed, and losing the selection is what removes this box from the tree.
+            .pointerInput("grab-$id") {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    down.consume()
+                    select()
+                    // Snapshot at drag start and never re-read: `base` is both the fixed top-left
+                    // anchor for the whole gesture and the seed for the running size. Seed from the
+                    // size actually on screen, not the stored one — GEAR and INDICATORS are shorter
+                    // than the 44 dp floor, so seeding raw left the accumulator below what the first
+                    // event snapped to and the next ~12 dp of drag did nothing.
+                    val base = pos()
+                    val shown = LayoutEdit.resized(base, base.w, base.h, canvasWDp, canvasHDp)
+                    var liveW = shown.w
+                    var liveH = shown.h
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if (change.changedToUpIgnoreConsumed()) {
+                            change.consume()
+                            break
+                        }
+                        val drag = change.positionChange()
+                        change.consume()
+                        if (drag == Offset.Zero) continue
+                        liveW += (drag.x / density) / canvasWDp
+                        liveH += (drag.y / density) / canvasHDp
+                        emit(LayoutEdit.resized(base, liveW, liveH, canvasWDp, canvasHDp))
+                    }
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier
+                .size(HANDLE_SIZE)
+                .clip(RoundedCornerShape(50))
+                .background(PitWall.WheelGlow.copy(alpha = 0.85f)),
+            contentAlignment = Alignment.Center,
+        ) { Text("⤡", color = PitWall.Ink, fontSize = 12.sp) }
     }
 }
 
