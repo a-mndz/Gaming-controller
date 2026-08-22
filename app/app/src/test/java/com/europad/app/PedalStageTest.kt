@@ -54,4 +54,58 @@ class PedalStageTest {
         assertEquals(127, byteValue)
         assertTrue(byteValue in 100..155)
     }
+
+    @Test
+    fun ramp_interpolatesFromFirstLevelToFull() {
+        // A step from 0.5 to 1.0 in one frame reads in-game as the brakes abruptly grabbing;
+        // the ramp spreads the same commitment over the ramp window.
+        assertEquals(
+            0.5f,
+            PedalStage.levelForHold(3000L, stageMs = 3000L, firstLevel = 0.5f, rampMs = 1000L),
+            0.0001f,
+        )
+        assertEquals(
+            0.75f,
+            PedalStage.levelForHold(3500L, stageMs = 3000L, firstLevel = 0.5f, rampMs = 1000L),
+            0.0001f,
+        )
+        assertEquals(
+            1f,
+            PedalStage.levelForHold(4000L, stageMs = 3000L, firstLevel = 0.5f, rampMs = 1000L),
+            0.0001f,
+        )
+    }
+
+    @Test
+    fun ramp_clampsPastItsEnd() {
+        assertEquals(
+            1f,
+            PedalStage.levelForHold(10_000L, stageMs = 3000L, firstLevel = 0.5f, rampMs = 1000L),
+            0.0001f,
+        )
+    }
+
+    @Test
+    fun ramp_isMonotonicAcrossTheBoundary() {
+        var prev = 0f
+        for (held in 2900L..4200L step 50L) {
+            val level = PedalStage.levelForHold(held, stageMs = 3000L, firstLevel = 0.5f, rampMs = 1000L)
+            assertTrue("level went down at held=${held}ms", level >= prev)
+            prev = level
+        }
+        assertEquals(1f, prev, 0.0001f)
+    }
+
+    @Test
+    fun ramp_withCustomFirstLevelStaysContinuous() {
+        // At the stage boundary the ramp must start exactly at firstLevel — a discontinuity
+        // there is the bug this parameter exists to fix.
+        assertEquals(
+            0.3f,
+            PedalStage.levelForHold(500L, stageMs = 500L, firstLevel = 0.3f, rampMs = 500L),
+            0.0001f,
+        )
+        val justAfter = PedalStage.levelForHold(510L, stageMs = 500L, firstLevel = 0.3f, rampMs = 500L)
+        assertTrue("ramp jumps at the boundary", justAfter >= 0.3f && justAfter <= 0.32f)
+    }
 }

@@ -36,6 +36,17 @@ object GyroMath {
     fun inPlaneMagnitude(gx: Float, gy: Float): Float = sqrt(gx * gx + gy * gy)
 
     /**
+     * In-plane share of the gravity vector, 0..1. 1 is fully upright (all of gravity lies in the
+     * screen plane), 0 is flat or a dead sensor. The hysteresis gate consumes this number; a bare
+     * boolean cannot express "trip at 0.26, recover at 0.35".
+     */
+    fun gripRatio(gx: Float, gy: Float, gz: Float): Float {
+        val total = sqrt(gx * gx + gy * gy + gz * gz)
+        if (total < 1e-3f) return 0f
+        return inPlaneMagnitude(gx, gy) / total
+    }
+
+    /**
      * Is the phone held steeply enough for [rollFromGravity] to mean anything?
      *
      * Laid flat, gravity is almost entirely along the screen normal and the in-plane part is sensor
@@ -43,11 +54,8 @@ object GyroMath {
      * fixed m/s² figure) keeps this independent of sensor scaling. The 0.26 ratio trips at about 75°
      * of lean-back, so a relaxed 30-45° driving posture is comfortably inside.
      */
-    fun isGripUsable(gx: Float, gy: Float, gz: Float, minRatio: Float = 0.26f): Boolean {
-        val total = sqrt(gx * gx + gy * gy + gz * gz)
-        if (total < 1e-3f) return false
-        return inPlaneMagnitude(gx, gy) / total >= minRatio
-    }
+    fun isGripUsable(gx: Float, gy: Float, gz: Float, minRatio: Float = 0.26f): Boolean =
+        gripRatio(gx, gy, gz) >= minRatio
 
     /**
      * Continuous angle accumulator. [rollFromGravity] wraps at ±π, and a wrap mid-turn would flip the

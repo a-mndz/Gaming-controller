@@ -66,6 +66,7 @@ import com.europad.app.input.GyroSteering
 import com.europad.app.input.InputFrame
 import com.europad.app.input.PedalStage
 import com.europad.app.input.SteerReturn
+import com.europad.app.input.WheelDrag
 import com.europad.app.net.ConnState
 import com.europad.app.net.FrameEncoder
 import com.europad.app.net.UdpTransport
@@ -932,13 +933,14 @@ private fun WheelControl(
         modifier = modifier
             .semantics { contentDescription = "pad:WHEEL" }
             .pointerInput(wheelRangeDeg) {
-                // Pivot is read per gesture, not captured once: the layout editor can move or resize
-                // the wheel without changing wheelRangeDeg, so a captured centre goes stale and the
-                // whole rotation is measured about the wrong point (tiny angular travel, so the wheel
-                // never reaches full lock). `size` on the pointer scope always reflects the last
-                // measure pass.
+                // Pivot and gate are read per gesture, not captured once: the layout editor can move
+                // or resize the wheel without changing wheelRangeDeg, so a captured centre goes stale
+                // and the whole rotation is measured about the wrong point (tiny angular travel, so
+                // the wheel never reaches full lock). `size` on the pointer scope always reflects the
+                // last measure pass.
                 var cx = 0f
                 var cy = 0f
+                var deadRadius = 0f
                 var lastAngleRad = 0.0
 
                 detectDragGestures(
@@ -946,6 +948,7 @@ private fun WheelControl(
                         tick()
                         cx = size.width / 2f
                         cy = size.height / 2f
+                        deadRadius = WheelDrag.deadRadiusPx(minOf(size.width, size.height).toFloat())
                         // Cancel here, not inside a fresh coroutine: the old animation used to keep
                         // writing currentAngleDeg/onSteer while the finger was already dragging.
                         dragging = true
@@ -955,15 +958,24 @@ private fun WheelControl(
                     },
                     onDrag = { change, _ ->
                         change.consume()
-                        val curAngleRad = kotlin.math.atan2((change.position.y - cy).toDouble(), (change.position.x - cx).toDouble())
-                        var diffRad = curAngleRad - lastAngleRad
-                        while (diffRad > PI) diffRad -= 2 * PI
-                        while (diffRad < -PI) diffRad += 2 * PI
-
-                        val diffDeg = (diffRad * 180.0 / PI).toFloat()
-                        currentAngleDeg = (currentAngleDeg + diffDeg).coerceIn(-maxTurnDeg, maxTurnDeg)
-                        lastAngleRad = curAngleRad
-                        onSteer((currentAngleDeg / maxTurnDeg).coerceIn(-1f, 1f))
+                        // Inside the hub the finger's angle about the pivot is jitter; WheelDrag
+                        // returns null there, leaving both the wheel and the reference angle frozen,
+                        // so crossing the hub resumes with the true swept arc instead of a jump.
+                        val px = change.position.x - cx
+                        val py = change.position.y - cy
+                        val step = WheelDrag.step(
+                            currentAngleDeg,
+                            maxTurnDeg,
+                            lastAngleRad,
+                            kotlin.math.atan2(py.toDouble(), px.toDouble()),
+                            kotlin.math.hypot(px, py),
+                            deadRadius,
+                        )
+                        if (step != null) {
+                            currentAngleDeg = step.angleDeg
+                            lastAngleRad = step.lastAngleRad
+                            onSteer(step.steer)
+                        }
                     },
                     onDragEnd = {
                         dragging = false
@@ -1115,15 +1127,35 @@ private fun MetallicPedal(
                             coroutineScope.launch { animatedValue.animateTo(opening, androidx.compose.animation.core.tween(60)) }
 
                             // withTimeoutOrNull returns null only if the finger is still down when the
-                            // stage boundary passes — the "held it deliberately" case, so go to the
-                            // floor and then wait for the real release. A one-stage pedal (stageMs = 0)
-                            // already opened at full and just waits.
+                            // stage boundary passes — the "held it deliberately" case, so commit to
+                            // the floor and then wait for the real release. A one-stage pedal
+                            // (stageMs = 0) already opened at full and just waits.
                             if (stageMs > 0L) {
                                 if (withTimeoutOrNull(stageMs) { tryAwaitRelease() } == null) {
                                     tick()
-                                    deck.setInput { it.axes[axis] = PedalStage.axis(1f) }
-                                    coroutineScope.launch { animatedValue.animateTo(1f, androidx.compose.animation.core.tween(140)) }
+                                    // Stage two ramps to the floor: a one-frame jump from 0.5 to
+                                    // 1.0 reads as the brakes abruptly grabbing, the ramp reads as
+                                    // the pedal travelling. Cancelled by the release below.
+                                    val ramp = coroutineScope.launch {
+                                        val startedAt = System.nanoTime() / 1_000_000L
+                                        while (true) {
+                                            val heldPastStage = System.nanoTime() / 1_000_000L - startedAt
+                                            deck.setInput {
+                                                it.axes[axis] = PedalStage.axis(
+                                                    PedalStage.levelForHold(
+                                                        stageMs + heldPastStage, stageMs, firstLevel, PedalStage.STAGE_RAMP_MS,
+                                                    )
+                                                )
+                                            }
+                                            if (heldPastStage >= PedalStage.STAGE_RAMP_MS) break
+                                            delay(16)
+                                        }
+                                    }
+                                    coroutineScope.launch {
+                                        animatedValue.animateTo(1f, androidx.compose.animation.core.tween(PedalStage.STAGE_RAMP_MS.toInt()))
+                                    }
                                     tryAwaitRelease()
+                                    ramp.cancel()
                                 }
                             } else {
                                 tryAwaitRelease()

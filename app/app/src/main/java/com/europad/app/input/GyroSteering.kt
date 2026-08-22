@@ -108,6 +108,8 @@ class GyroSteering(context: Context) {
     @Volatile private var smooth = 0f
     @Volatile private var flat = false
 
+    private val gripGate = GripGate()
+
     private var sensorThread: HandlerThread? = null
 
     /** True while the phone is too close to horizontal for tilt to mean anything. */
@@ -137,17 +139,24 @@ class GyroSteering(context: Context) {
                 fz += a * (v[2] - fz)
             }
 
-            if (!GyroMath.isGripUsable(fx, fy, fz)) {
-                // Flat on a table or a desk mount. Do not freeze at the last angle: a phone set down
-                // mid-corner would hold that lock indefinitely. Bleed to centre instead, and drop the
-                // angle reference so picking it back up re-seeds cleanly rather than jumping.
-                flat = true
-                haveAngle = false
-                smooth = GyroMath.complementaryStep(smooth, 0f, GyroMath.emaAlpha(dtMs, FLAT_RECOVER_TAU_MS))
-                onSteer?.invoke(smooth)
-                return
+            // Hysteresis gate: a grip hovering near the flat threshold used to flip flat on single
+            // samples, and every flip dropped the declared centre — the wheel let go mid-corner.
+            // A brief dip now freezes the axis (what a held wheel does); only a dip that outlasts
+            // the dwell is a phone set down, and only then does the centre drop and the axis bleed.
+            when (gripGate.sample(GyroMath.gripRatio(fx, fy, fz), dtMs)) {
+                GripGate.State.Dip -> return
+                GripGate.State.Flat -> {
+                    // Flat on a table or a desk mount. Do not freeze at the last angle: a phone set
+                    // down mid-corner would hold that lock indefinitely. Bleed to centre instead,
+                    // and drop the angle reference so picking it back up re-seeds cleanly.
+                    flat = true
+                    haveAngle = false
+                    smooth = GyroMath.complementaryStep(smooth, 0f, GyroMath.emaAlpha(dtMs, FLAT_RECOVER_TAU_MS))
+                    onSteer?.invoke(smooth)
+                    return
+                }
+                GripGate.State.Usable -> flat = false
             }
-            flat = false
 
             val raw = GyroMath.rollFromGravity(fx, fy)
             if (!haveAngle) {
@@ -220,5 +229,6 @@ class GyroSteering(context: Context) {
         centerAngle = 0f
         smooth = 0f
         flat = false
+        gripGate.reset()
     }
 }

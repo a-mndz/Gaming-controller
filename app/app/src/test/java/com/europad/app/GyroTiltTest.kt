@@ -105,6 +105,15 @@ class GyroTiltTest {
     }
 
     @Test
+    fun `grip ratio spans upright to flat and guards a zero vector`() {
+        // The hysteresis gate consumes this number, so it must be the real ratio.
+        assertEquals(1.0f, GyroMath.gripRatio(g, 0f, 0f), 1e-3f)      // upright, gravity fully in-plane
+        assertEquals(0.0f, GyroMath.gripRatio(0f, 0f, g), 1e-3f)      // flat, gravity along the normal
+        assertEquals(0.7071f, GyroMath.gripRatio(g * 0.7071f, 0f, g * 0.7071f), 1e-3f) // 45 degrees
+        assertEquals(0.0f, GyroMath.gripRatio(0f, 0f, 0f), 1e-6f)     // freefall / dead sensor
+    }
+
+    @Test
     fun `full lock at half the configured range`() {
         val range = deg(180.0) // GYRO_RANGES default
         val delta = deltaFor(neutralLandscape, deg(90.0))

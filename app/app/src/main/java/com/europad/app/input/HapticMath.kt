@@ -31,4 +31,23 @@ object HapticMath {
         val on = (DUTY_PERIOD_MS * amp.coerceIn(0f, 1f)).roundToLong().coerceIn(MIN_ON_MS, DUTY_PERIOD_MS)
         return longArrayOf(on, DUTY_PERIOD_MS - on)
     }
+
+    /**
+     * Whether the running waveform must be cancelled and restarted for a frame at [newAmp], given
+     * the amplitude the motor is currently playing ([lastAmp], null after silence).
+     *
+     * The server coalesces rumble to ~33 ms frames, and a game at speed jitters the motors a step
+     * either side of steady on nearly every one. Restarting per frame cancels the waveform mid-
+     * cycle, and an ERM mass needs tens of ms to spin up — restarted forever, it never reaches
+     * full deflection, and the rumble reads weak and choppy. Within [RESTART_DEADBAND] of the
+     * running amplitude the change is imperceptible, so the looping waveform is left alone.
+     */
+    fun shouldRestart(lastAmp: Float?, newAmp: Float): Boolean {
+        if (newAmp <= 0f) return false
+        val last = lastAmp ?: return true
+        return kotlin.math.abs(newAmp - last) >= RESTART_DEADBAND
+    }
+
+    /** Amplitude difference below which restarting the waveform buys nothing but spin-up loss. */
+    const val RESTART_DEADBAND = 0.06f
 }

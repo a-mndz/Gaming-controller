@@ -2,6 +2,7 @@ package com.europad.app
 
 import com.europad.app.input.HapticMath
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -56,5 +57,31 @@ class HapticMathTest {
         val faint = HapticMath.dutyTimings(0.01f)!!
         assertEquals(HapticMath.MIN_ON_MS, faint[0]) // floor keeps even tiny rumbles perceptible
         assertTrue(faint[1] > faint[0])
+    }
+
+    @Test
+    fun `restart policy fires on the first frame`() {
+        assertTrue(HapticMath.shouldRestart(null, 0.5f))
+    }
+
+    @Test
+    fun `restart policy skips unchanged amplitude`() {
+        assertFalse(HapticMath.shouldRestart(0.5f, 0.5f))
+        // The game's rumble jitters a step either side every frame; restarting the waveform
+        // each time never lets an ERM motor finish spinning up.
+        assertFalse(HapticMath.shouldRestart(0.5f, 0.51f))
+    }
+
+    @Test
+    fun `restart policy fires on a real change`() {
+        assertTrue(HapticMath.shouldRestart(0.5f, 0.6f))
+        assertTrue(HapticMath.shouldRestart(0.6f, 0.5f))
+    }
+
+    @Test
+    fun `restart policy never fires for silence`() {
+        // Stopping is the caller's cancel() — a restart would just vibrate at zero.
+        assertFalse(HapticMath.shouldRestart(null, 0f))
+        assertFalse(HapticMath.shouldRestart(0.5f, 0f))
     }
 }
