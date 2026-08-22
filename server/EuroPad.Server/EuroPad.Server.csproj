@@ -20,6 +20,13 @@
     <PackageReference Include="Makaretu.Dns.Multicast" Version="0.27.0" />
     <PackageReference Include="Nefarius.ViGEm.Client" Version="1.21.256" />
     <PackageReference Include="QRCoder" Version="1.6.0" />
+    <!-- Makaretu.Dns.Multicast 0.27.0 transitively pulls the 4.3.0 line of these two, which
+         carry High advisories (GHSA-7jgj-8wvc-jh57, GHSA-cmhx-cq75-c4mj). On net8.0 the runtime
+         uses the inbox implementations, so exposure is minimal — but anything scanning the graph
+         fails the build. Pinning each package's patched line satisfies both without touching
+         behaviour (System.Net.Http fixed at 4.3.4, System.Text.RegularExpressions at 4.3.1). -->
+    <PackageReference Include="System.Net.Http" Version="4.3.4" />
+    <PackageReference Include="System.Text.RegularExpressions" Version="4.3.1" />
   </ItemGroup>
 
 </Project>

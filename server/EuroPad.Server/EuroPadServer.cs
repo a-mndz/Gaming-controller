@@ -66,7 +66,17 @@ public sealed class EuroPadServer : IAsyncDisposable
         Console.WriteLine($"Profiles: {ProfilesDir()}");
         Console.WriteLine($"Profile: {_profiles.ActiveName} (available: {string.Join(", ", _profiles.Names)}) — edit the JSON, it hot-reloads");
         PrintReachableAddresses(port);
-        if (_pinEnabled) Console.WriteLine($"PIN gate enabled ({_pin:D4})");
+        if (_pinEnabled)
+            Console.WriteLine($"PIN gate enabled ({_pin:D4})");
+        else
+        {
+            // Without a PIN the first HELLO from any host on this LAN gets a slot, and a paired
+            // phone can press every key in the profile's allow-list (VkLookup). Fine on a home
+            // network the owner controls; on anything shared it is a remote keyboard. Say so
+            // loudly rather than burying it in the README's "--pin if you want" aside.
+            Console.WriteLine("WARNING: no PIN set -- any device on this network can pair and press keys.");
+            Console.WriteLine("         Start with --pin <0000-9999> to lock the link.");
+        }
         PrintPairingQr(port);
 
         try
