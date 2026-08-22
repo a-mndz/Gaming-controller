@@ -72,6 +72,9 @@ RULES.md
 CONTINUE.md
 DESIGN.md
 PRODUCT.md
+ARCHITECTURE.md
+PRD.md
+PROJECT_BIBLE.md
 
 # EuroPad runtime logs and machine-local profiles
 *.log
